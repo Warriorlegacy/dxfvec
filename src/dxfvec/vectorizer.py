@@ -114,6 +114,71 @@ def _fuse_canny(gray: np.ndarray) -> np.ndarray:
     return cv2.morphologyEx(fused, cv2.MORPH_CLOSE, k, iterations=1)
 
 
+def _merge_nearby_outlines(outlines: list[dict],
+                            max_centroid_gap_px: float = 30) -> list[dict]:
+    """Group nearby outlines and merge each group into its convex hull.
+
+    In photo mode the dilated edge map often splits one physical shape into
+    several close contour rings (hatching lines create islands inside the
+    outline). This function collapses those rings back into one clean outer
+    silhouette so we don't emit dozens of overlapping polylines.
+    """
+    if len(outlines) <= 1:
+        return outlines
+
+    centroids = np.array([np.mean(o["points"], axis=0) for o in outlines])
+
+    # Union-Find to group centroids within max_centroid_gap_px
+    parent = list(range(len(outlines)))
+    rank = [0] * len(outlines)
+
+    def find(x):
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(a, b):
+        ra, rb = find(a), find(b)
+        if ra == rb:
+            return
+        if rank[ra] < rank[rb]:
+            parent[ra] = rb
+        elif rank[ra] > rank[rb]:
+            parent[rb] = ra
+        else:
+            parent[rb] = ra
+            rank[ra] += 1
+
+    for i in range(len(outlines)):
+        for j in range(i + 1, len(outlines)):
+            if np.linalg.norm(centroids[i] - centroids[j]) <= max_centroid_gap_px:
+                union(i, j)
+
+    groups: dict[int, list[int]] = {}
+    for i in range(len(outlines)):
+        groups.setdefault(find(i), []).append(i)
+
+    merged = []
+    for idxs in groups.values():
+        if len(idxs) == 1:
+            merged.append(outlines[idxs[0]])
+            continue
+        all_pts = []
+        for i in idxs:
+            all_pts.extend(outlines[i]["points"])
+        arr = np.array(all_pts, dtype=np.float32)
+        hull = cv2.convexHull(arr)
+        hull_pts = hull.reshape(-1, 2).tolist()
+        merged.append({
+            "points": hull_pts,
+            "closed": True,
+            "area": float(cv2.contourArea(hull)),
+            "perimeter": float(cv2.arcLength(hull, True)),
+        })
+    return merged
+
+
 # ── image modifier (kept for backward compat / drawing mode) ─────────────────
 
 class ImageModifier:
@@ -169,26 +234,29 @@ class ImageModifier:
 # ── contour utilities ─────────────────────────────────────────────────────────
 
 class ShapeDetector:
-    def __init__(self, min_area: int = 100, max_area: int | None = None):
+    def __init__(self, min_area: int = 100, max_area: int | None = None,
+                 retr_mode: int = cv2.RETR_LIST):
         self.min_area = min_area
         self.max_area = max_area or 2_000_000
+        self.retr_mode = retr_mode
 
     def detect_contours(self, binary: np.ndarray) -> list[np.ndarray]:
         contours, _ = cv2.findContours(
-            binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+            binary, self.retr_mode, cv2.CHAIN_APPROX_SIMPLE)
         return [c for c in contours
                 if self.min_area <= cv2.contourArea(c) <= self.max_area]
 
     @staticmethod
     def detect_outlines(contours: list[np.ndarray],
-                        epsilon_ratio: float = 0.015) -> list[dict]:
+                        epsilon_ratio: float = 0.015,
+                        min_pts: int = 4) -> list[dict]:
         out = []
         for c in contours:
             peri = cv2.arcLength(c, True)
-            if peri == 0:
+            if peri < 40:
                 continue
             approx = cv2.approxPolyDP(c, epsilon_ratio * peri, True)
-            if len(approx) >= 4 or cv2.isContourConvex(approx):
+            if len(approx) >= min_pts or cv2.isContourConvex(approx):
                 pts = approx.reshape(-1, 2).tolist()
                 if len(pts) >= 3:
                     out.append({"points": pts, "closed": True,
@@ -197,26 +265,37 @@ class ShapeDetector:
         return sorted(out, key=lambda x: x["area"], reverse=True)
 
     @staticmethod
-    def detect_circles(binary: np.ndarray, min_r: int = 5, max_r: int = 100
-                       ) -> list[dict]:
+    def detect_circles(binary: np.ndarray, min_r: int = 8, max_r: int = 80,
+                       contour_mask: np.ndarray | None = None) -> list[dict]:
         if binary.dtype != np.uint8:
             binary = binary.astype(np.uint8)
-        cs = cv2.HoughCircles(binary, cv2.HOUGH_GRADIENT, dp=1, minDist=20,
-                               param1=50, param2=30, minRadius=min_r,
+        cs = cv2.HoughCircles(binary, cv2.HOUGH_GRADIENT, dp=1, minDist=25,
+                               param1=60, param2=35, minRadius=min_r,
                                maxRadius=max_r)
         if cs is None:
             return []
-        return [{"cx": float(x), "cy": float(y), "r": float(r),
-                 "area": float(np.pi * r * r)}
-                for x, y, r in cs[0]]
+        result = []
+        if contour_mask is not None:
+            for x, y, r in cs[0]:
+                cx, cy = int(x), int(y)
+                if 0 <= cy < contour_mask.shape[0] and 0 <= cx < contour_mask.shape[1]:
+                    if contour_mask[cy, cx] == 0:
+                        continue
+                result.append({"cx": float(x), "cy": float(y), "r": float(r),
+                               "area": float(np.pi * r * r)})
+        else:
+            for x, y, r in cs[0]:
+                result.append({"cx": float(x), "cy": float(y), "r": float(r),
+                               "area": float(np.pi * r * r)})
+        return result
 
     @staticmethod
-    def detect_lines(binary: np.ndarray) -> list[dict]:
+    def detect_lines(binary: np.ndarray, min_len: int = 40) -> list[dict]:
         if binary.dtype != np.uint8:
             binary = binary.astype(np.uint8)
         edges = cv2.Canny(binary, 50, 150)
-        raw = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=40,
-                               minLineLength=20, maxLineGap=8)
+        raw = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=35,
+                               minLineLength=min_len, maxLineGap=6)
         if raw is None:
             return []
         result = []
@@ -228,30 +307,31 @@ class ShapeDetector:
 
     @staticmethod
     def detect_polygons(contours: list[np.ndarray],
-                        max_sides: int = 16) -> list[dict]:
+                        max_sides: int = 12, min_area: int = 200) -> list[dict]:
         polys = []
         for c in contours:
+            area = cv2.contourArea(c)
+            if area < min_area:
+                continue
             peri = cv2.arcLength(c, True)
-            if peri == 0:
+            if peri < 50:
                 continue
             approx = cv2.approxPolyDP(c, 0.02 * peri, True)
             sides = len(approx)
             if 3 <= sides <= max_sides:
                 pts = approx.reshape(-1, 2).tolist()
-                area = float(cv2.contourArea(c))
                 x, y, bw, bh = cv2.boundingRect(approx)
                 fill_ratio = area / (bw * bh + 1e-6)
-                if fill_ratio > 0.2:  # discard very thin artefacts
+                if fill_ratio > 0.25:
                     polys.append({"points": pts, "sides": sides,
-                                  "area": area, "closed": True})
+                                  "area": float(area), "closed": True})
         return polys
 
     @staticmethod
     def detect_ellipses(contours: list[np.ndarray]) -> list[dict]:
         ellipses = []
         for c in contours:
-            peri = cv2.arcLength(c, True)
-            if peri == 0 or len(c) < 5:
+            if cv2.contourArea(c) < 300 or len(c) < 5:
                 continue
             try:
                 el = cv2.fitEllipse(c)
@@ -259,13 +339,11 @@ class ShapeDetector:
                 continue
             area_c = cv2.contourArea(c)
             area_e = np.pi * el[1][0] * el[1][1] / 4
-            if area_e > 0 and 0.5 < area_c / area_e < 2.0:
-                cx, cy = el[0]
-                a, b = el[1]
-                ellipses.append({"cx": float(cx), "cy": float(cy),
-                                  "a": float(a), "b": float(b),
-                                  "angle": float(el[2]),
-                                  "area": float(area_c)})
+            if area_e > 0 and 0.6 < area_c / area_e < 1.5:
+                ellipses.append({"cx": float(el[0][0]), "cy": float(el[0][1]),
+                                 "a": float(el[1][0]), "b": float(el[1][1]),
+                                 "angle": float(el[2]),
+                                 "area": float(area_c)})
         return ellipses
 
 
@@ -286,37 +364,51 @@ class DXFGenerator:
         for name, color in self.COLORS.items():
             self.doc.layers.add(name, color=color)
 
+    @staticmethod
+    def _flatten(pts):
+        """Convert [{"x":..,"y":..}, ...] → [(x,y), ...] for ezdxf."""
+        if not pts:
+            return []
+        if isinstance(pts[0], dict):
+            return [(p["x"], p["y"]) for p in pts]
+        return [(p[0], p[1]) for p in pts]
+
     def add_outline(self, points, closed=True):
         if len(points) < 3:
             return
         msp = self.doc.modelspace()
-        msp.add_lwpolyline(points, close=closed, dxfattribs={"layer": "OUTLINE"})
+        msp.add_lwpolyline(
+            self._flatten(points), close=closed,
+            dxfattribs={"layer": "OUTLINE", "elevation": 0, "thickness": 0})
 
     def add_hole(self, cx, cy, r):
         msp = self.doc.modelspace()
-        msp.add_circle((cx, cy), r, dxfattribs={"layer": "HOLE"})
+        msp.add_circle((cx, cy, 0), r, dxfattribs={"layer": "HOLE"})
 
     def add_line(self, points):
         if len(points) < 2:
             return
         msp = self.doc.modelspace()
-        msp.add_line(points[0], points[1], dxfattribs={"layer": "LINE"})
+        a, b = self._flatten(points)[:2]
+        msp.add_line((a[0], a[1], 0), (b[0], b[1], 0),
+                     dxfattribs={"layer": "LINE"})
 
     def add_polygon(self, points, closed=True):
         if len(points) < 3:
             return
         msp = self.doc.modelspace()
-        msp.add_lwpolyline(points, close=closed, dxfattribs={"layer": "POLYGON"})
+        msp.add_lwpolyline(
+            self._flatten(points), close=closed,
+            dxfattribs={"layer": "POLYGON", "elevation": 0, "thickness": 0})
 
     def add_ellipse(self, cx: float, cy: float, a: float, b: float,
                     angle_deg: float = 0.0):
-        """Add ellipse to DXF."""
         msp = self.doc.modelspace()
         ratio = min(b / a, 1.0) if a > 0 else 1.0
         rad = math.radians(angle_deg)
         msp.add_ellipse(
-            (cx, cy),
-            major_axis=(a * math.cos(rad), a * math.sin(rad)),
+            (cx, cy, 0),
+            major_axis=(a * math.cos(rad), a * math.sin(rad), 0),
             ratio=ratio,
             dxfattribs={"layer": "ELLIPSE"},
         )
@@ -331,10 +423,11 @@ class DXFGenerator:
 class Vectorizer:
     """Universal vectorization pipeline — drawing OR photo/pattern mode."""
 
-    def __init__(self, min_area: int = 80, simplify_tolerance: float = 1.5):
+    def __init__(self, min_area: int = 80, simplify_tolerance: float = 1.5,
+                 retr_mode: int = cv2.RETR_LIST):
         self.min_area = min_area
         self.simplify_tolerance = simplify_tolerance
-        self.detector = ShapeDetector(min_area=min_area)
+        self.retr_mode = retr_mode
         self._mode: str | None = None
 
     MAX_IMAGE_DIM = 2048
@@ -354,10 +447,13 @@ class Vectorizer:
 
         img = _resize_max_dim(img)
         self._mode = _detect_mode(img)
+        # Photo mode: only outer silhouettes — prevents hatching/internal noise
+        self.retr_mode = (cv2.RETR_EXTERNAL if self._mode == "photo"
+                          else cv2.RETR_LIST)
 
         if self._mode == "drawing":
             return self._preprocess_drawing(img, output_dir)
-        return self._preprocess_photo(img, output_dir)   # also handles patterns
+        return self._preprocess_photo(img, output_dir)
 
     def _preprocess_drawing(self, img: np.ndarray,
                             out: Path) -> Tuple[np.ndarray, np.ndarray]:
@@ -402,24 +498,55 @@ class Vectorizer:
         processed, binary = self.preprocess(image_path, output_dir)
         is_drawing = (self._mode == "drawing")
 
-        contours = self.detector.detect_contours(binary)
-        outlines  = self.detector.detect_outlines(contours, self.simplify_tolerance)
-        holes     = self.detector.detect_circles(binary)
-        lines     = self.detector.detect_lines(binary)
-        polygons  = (self.detector.detect_polygons(contours)
-                     if is_drawing else [])
-        ellipses  = (self.detector.detect_ellipses(contours)
-                     if not is_drawing else [])
+        # Build detector with mode-appropriate retr_mode and min_area
+        min_a = self.min_area if is_drawing else max(self.min_area, 200)
+        detector = ShapeDetector(min_area=min_a, retr_mode=self.retr_mode)
 
-        if not polygons and not is_drawing:
-            polygons = self.detector.detect_polygons(contours)
+        # Build a filled-contour mask so circles can check: "am I inside a shape?"
+        contour_mask = np.zeros(binary.shape[:2], dtype=np.uint8)
+        all_contours, _ = cv2.findContours(
+            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        cv2.drawContours(contour_mask, all_contours, -1, 255, thickness=cv2.FILLED)
+
+        contours  = detector.detect_contours(binary)
+        outlines  = detector.detect_outlines(contours, self.simplify_tolerance)
+
+        # For drawing mode: polygons from contours; for photo: outline-sized shapes only
+        if is_drawing:
+            polygons = detector.detect_polygons(contours)
+            ellipses = []
+        else:
+            polygons = []            # outlines capture the filled shapes
+            ellipses = detector.detect_ellipses(contours)
+
+        # Photo mode: merge nearby outlines into single large silhouettes
+        # so a fragmented hatching boundary collapses into one clean shape
+        if not is_drawing and len(outlines) > 1:
+            outlines = _merge_nearby_outlines(outlines, max_centroid_gap_px=30)
+
+        # Circles: suppress if centre is inside an existing outline (noise)
+        outline_centroids = np.array(
+            [np.mean(o["points"], axis=0) for o in outlines], dtype=np.int32)
+        suppress = set()
+        for ci, co in enumerate(outline_centroids):
+            if 0 <= co[1] < contour_mask.shape[0] and 0 <= co[0] < contour_mask.shape[1]:
+                if contour_mask[co[1], co[0]] > 0:
+                    suppress.add(ci)
+
+        raw_circles = detector.detect_circles(binary, contour_mask=contour_mask)
+        holes = [h for i, h in enumerate(raw_circles)
+                 if i not in suppress and h["area"] > 500]
+
+        # Lines: filter highly-duplicate segments that overlap outlines
+        raw_lines = detector.detect_lines(binary)
+        lines = self._dedupe_lines(raw_lines, outlines, binary.shape)
 
         if scale_factor is not None:
-            outlines  = self._scale(outlines, "points", scale_factor)
-            holes     = self._scale(holes, ["cx", "cy", "r"], scale_factor)
-            lines     = self._scale(lines, "points", scale_factor)
-            polygons  = self._scale(polygons, "points", scale_factor)
-            ellipses  = self._scale_ellipses(ellipses, scale_factor)
+            outlines = self._scale(outlines, "points", scale_factor)
+            holes    = self._scale(holes,    ["cx", "cy", "r"], scale_factor)
+            lines    = self._scale(lines,    "points", scale_factor)
+            polygons = self._scale(polygons, "points", scale_factor)
+            ellipses = self._scale_ellipses(ellipses, scale_factor)
 
         dxf_gen = DXFGenerator()
         for o in outlines:
@@ -431,7 +558,8 @@ class Vectorizer:
         for p in polygons:
             dxf_gen.add_polygon(p["points"], p["closed"])
         for el in ellipses:
-            dxf_gen.add_ellipse(el["cx"], el["cy"], el["a"], el["b"], el.get("angle", 0))
+            dxf_gen.add_ellipse(el["cx"], el["cy"], el["a"], el["b"],
+                                el.get("angle", 0))
 
         dxf_path = dxf_gen.save(output_dir / "drawing.dxf")
         review_path = self._write_review(
@@ -455,7 +583,31 @@ class Vectorizer:
             },
         }
 
-    # ── scaling helpers ──────────────────────────────────────────────────────
+    @staticmethod
+    def _dedupe_lines(raw_lines: list[dict], outlines: list[dict],
+                      shape: tuple) -> list[dict]:
+        """Remove line segments that are nearly collinear with outline edges."""
+        if not raw_lines or not outlines:
+            return raw_lines
+        h, w = shape[:2]
+        kept = []
+        edge_img = np.zeros((h, w), dtype=np.uint8)
+        for o in outlines:
+            pts = np.array(o["points"], dtype=np.int32)
+            cv2.polylines(edge_img, [pts], o["closed"], 255, 2)
+        for l in raw_lines:
+            x1, y1, x2, y2 = [int(v) for v in l["points"][0] + l["points"][1]]
+            length = np.hypot(x2 - x1, y2 - y1)
+            if length == 0:
+                continue
+            # Sample 10 points along the segment, check against edge map
+            sample = np.linspace(0, 1, 10)
+            ys = np.clip((y1 + sample * (y2 - y1)).astype(int), 0, h - 1)
+            xs = np.clip((x1 + sample * (x2 - x1)).astype(int), 0, w - 1)
+            if np.mean(edge_img[ys, xs]) > 100:
+                continue
+            kept.append(l)
+        return kept
 
     @staticmethod
     def _scale(items: list[dict], keys, sf: float) -> list[dict]:

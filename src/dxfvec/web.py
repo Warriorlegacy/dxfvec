@@ -350,6 +350,10 @@ def download(filename):
 
 # ── DXF Viewer API ─────────────────────────────────────────────────────────
 
+@app.route("/api/ping")
+def ping():
+    return jsonify({"status": "ok"})
+
 @app.route("/api/files")
 def list_files():
     """Return list of available DXF zip files with metadata."""
@@ -449,8 +453,11 @@ def _entity_xy(ent):
             yield p[0], p[1]
     elif t == "POLYLINE":
         for v in ent.vertices:
-            loc = v.dxf.location
-            yield loc.x, loc.y
+            try:
+                loc = v.dxf.location
+                yield loc.x, loc.y
+            except Exception:
+                pass
     elif t in ("CIRCLE", "ELLIPSE"):
         cx, cy = ent.dxf.center.x, ent.dxf.center.y
         if t == "CIRCLE":
@@ -474,9 +481,6 @@ def _entity_xy(ent):
             yield b.extmax.x, b.extmax.y
         except Exception:
             pass
-
-    return {"entities": entities, "layers": list(layers.keys()),
-            "bbox": bbox}
 
 
 def _aci_color(ent) -> str:
