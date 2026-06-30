@@ -1,18 +1,16 @@
-"""Local image vectorizer using OpenCV — NO API calls, 100% free.
+"""Universal image vectorizer using OpenCV — NO API calls, 100% free.
 
-This module performs:
-1. Image modification (resize, rotate, enhance, denoise)
-2. Edge detection and contour extraction
-3. Shape detection (lines, circles, polygons)
-4. DXF generation with proper layers
-
-No external API keys required. Everything runs locally.
+Automatically adapts to image type:
+  • Drawing/scan  → adaptive threshold (b/w documents, blueprints)
+  • Photo/pattern → multi-scale Canny edge fusion (photos, renders, textures)
+  • No external API keys required.
 """
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
-from typing import Any
+from typing import Any, Tuple
 
 import cv2
 import ezdxf
@@ -20,283 +18,310 @@ import numpy as np
 from ezdxf.enums import TextEntityAlignment
 
 
+# ── helpers ──────────────────────────────────────────────────────────────────
+
+def _resize_max_dim(img: np.ndarray, max_dim: int = 2048) -> np.ndarray:
+    h, w = img.shape[:2]
+    if max(h, w) <= max_dim:
+        return img
+    s = max_dim / max(h, w)
+    return cv2.resize(img, (int(w * s), int(h * s)), interpolation=cv2.INTER_AREA)
+
+
+def _enhance(img: np.ndarray, clip: float = 2.0) -> np.ndarray:
+    lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
+    l, a, b = cv2.split(lab)
+    clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8, 8))
+    l = clahe.apply(l)
+    return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+
+
+def _denoise(img: np.ndarray, h: float = 5.0) -> np.ndarray:
+    return cv2.fastNlMeansDenoisingColored(img, None, h, h, 5, 5)
+
+
+def _deskew(gray: np.ndarray) -> Tuple[np.ndarray, float]:
+    """Correct document rotation using Hough line angles (≤45°). Accepts gray or BGR."""
+    gray2 = cv2.cvtColor(gray, cv2.COLOR_BGR2GRAY) if gray.ndim == 3 else gray
+    edges = cv2.Canny(gray2, 50, 150, apertureSize=3)
+    lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=50)
+    if lines is None:
+        return gray, 0.0
+    angles = []
+    for line in lines[:30]:
+        rho, theta = line[0]
+        ang = (theta - np.pi / 2) * 180.0 / np.pi
+        if abs(ang) < 45:
+            angles.append(ang)
+    if not angles:
+        return gray, 0.0
+    median = float(np.median(angles))
+    if abs(median) < 0.5:
+        return gray, 0.0
+    h, w = gray2.shape
+    M = cv2.getRotationMatrix2D((w // 2, h // 2), median, 1.0)
+    return cv2.warpAffine(gray2, M, (w, h), flags=cv2.INTER_CUBIC,
+                          borderMode=cv2.BORDER_REPLICATE), median
+
+
+# ── adaptive mode detection ──────────────────────────────────────────────────
+
+def _detect_mode(img_bgr: np.ndarray) -> str:
+    """Return 'drawing' for clean b/w scans, 'photo' for everything else.
+
+    Key insight: a drawing (black lines on white paper) has no colour
+    information at all, so the mean saturation in HSV is essentially 0.
+    Photos, renders, textures, and screenshots all have measurable saturation.
+    """
+    hsv = cv2.cvtColor(img_bgr, cv2.COLOR_BGR2HSV)
+    sat_mean = float(np.mean(hsv[:, :, 1]))  # S channel only
+    # Also guard: very dark / very bright images without any colour → drawing
+    if sat_mean < 8:
+        return "drawing"
+    return "photo"
+
+
+# ── photo/pattern preprocessing ──────────────────────────────────────────────
+
+def _preprocess_photo(img_bgr: np.ndarray, out_dir: Path) -> np.ndarray:
+    """Multi-scale Canny edge fusion for photos, renders, textures."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    img_bgr = _resize_max_dim(img_bgr)
+    enhanced = _enhance(img_bgr)
+    denoised = _denoise(enhanced)
+    cv2.imwrite(str(out_dir / "preprocessed.png"), denoised)
+    gray = cv2.cvtColor(denoised, cv2.COLOR_BGR2GRAY)
+    # Multi-scale Canny fusion
+    edges = _fuse_canny(gray)
+    cv2.imwrite(str(out_dir / "edges.png"), edges)
+    return edges
+
+
+def _fuse_canny(gray: np.ndarray) -> np.ndarray:
+    """Combine Canny edges at multiple scales for robust detection."""
+    g = cv2.GaussianBlur(gray, (3, 3), 0)
+    fused = np.zeros_like(gray)
+    scales = [
+        (30, 80),   # fine — texture, small features
+        (50, 150),  # medium — main structure
+        (80, 250),  # coarse — big shapes
+    ]
+    for lo, hi in scales:
+        e = cv2.Canny(g, lo, hi)
+        fused = cv2.bitwise_or(fused, e)
+    # Morphological close gaps
+    k = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+    return cv2.morphologyEx(fused, cv2.MORPH_CLOSE, k, iterations=1)
+
+
+# ── image modifier (kept for backward compat / drawing mode) ─────────────────
+
 class ImageModifier:
-    """Image modification and enhancement utilities."""
-    
     @staticmethod
     def load(path: str | Path) -> np.ndarray:
-        """Load image from file."""
         img = cv2.imread(str(path))
         if img is None:
             raise FileNotFoundError(f"Cannot load image: {path}")
         return img
-    
+
     @staticmethod
-    def resize(img: np.ndarray, width: int | None = None, height: int | None = None, 
-               scale: float | None = None) -> np.ndarray:
-        """Resize image by width, height, or scale factor."""
+    def resize(img: np.ndarray, width=None, height=None, scale=None) -> np.ndarray:
         h, w = img.shape[:2]
         if scale:
-            return cv2.resize(img, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA)
+            return cv2.resize(img, None, fx=scale, fy=scale,
+                              interpolation=cv2.INTER_AREA)
         if width:
-            ratio = width / w
-            return cv2.resize(img, (width, int(h * ratio)), interpolation=cv2.INTER_AREA)
+            return cv2.resize(img, (width, int(h * width / w)),
+                              interpolation=cv2.INTER_AREA)
         if height:
-            ratio = height / h
-            return cv2.resize(img, (int(w * ratio), height), interpolation=cv2.INTER_AREA)
+            return cv2.resize(img, (int(w * height / h), height),
+                              interpolation=cv2.INTER_AREA)
         return img
-    
-    @staticmethod
-    def rotate(img: np.ndarray, angle: float) -> np.ndarray:
-        """Rotate image by angle degrees (centered)."""
-        h, w = img.shape[:2]
-        center = (w // 2, h // 2)
-        M = cv2.getRotationMatrix2D(center, angle, 1.0)
-        return cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
-    
+
     @staticmethod
     def enhance_contrast(img: np.ndarray, clip_limit: float = 2.0) -> np.ndarray:
-        """Enhance contrast using CLAHE (good for faded scans)."""
         lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
         l, a, b = cv2.split(lab)
         clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
         l = clahe.apply(l)
-        lab = cv2.merge([l, a, b])
-        return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
-    
+        return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+
     @staticmethod
     def denoise(img: np.ndarray, strength: int = 5) -> np.ndarray:
-        """Remove noise while preserving edges. Uses light params for web/container use."""
         return cv2.fastNlMeansDenoisingColored(img, None, strength, strength, 5, 5)
-    
-    @staticmethod
-    def sharpen(img: np.ndarray) -> np.ndarray:
-        """Sharpen image using unsharp mask."""
-        blur = cv2.GaussianBlur(img, (0, 0), 3)
-        return cv2.addWeighted(img, 1.5, blur, -0.5, 0)
-    
-    @staticmethod
-    def to_grayscale(img: np.ndarray) -> np.ndarray:
-        """Convert to grayscale."""
-        if len(img.shape) == 3:
-            return cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-        return img
-    
-    @staticmethod
-    def binarize(img: np.ndarray, method: str = "adaptive", block_size: int = 11, 
-                 c: int = 2) -> np.ndarray:
-        """Binarize image using various methods."""
-        gray = ImageModifier.to_grayscale(img)
-        if method == "adaptive":
-            return cv2.adaptiveThreshold(gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
-                                        cv2.THRESH_BINARY, block_size, c)
-        elif method == "otsu":
-            _, binary = cv2.threshold(gray, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-            return binary
-        elif method == "simple":
-            _, binary = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
-            return binary
-        return gray
-    
-    @staticmethod
-    def deskew(img: np.ndarray) -> tuple[np.ndarray, float]:
-        """Correct document rotation using Hough lines. Returns corrected image and angle."""
-        gray = ImageModifier.to_grayscale(img)
-        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-        lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=50)
-        
-        if lines is None:
-            return img, 0.0
-        
-        angles = []
-        for line in lines[:30]:
-            rho, theta = line[0]
-            angle = (theta - np.pi / 2) * 180.0 / np.pi
-            if abs(angle) < 45:
-                angles.append(angle)
-        
-        if not angles:
-            return img, 0.0
-        
-        median_angle = float(np.median(angles))
-        if abs(median_angle) < 0.5:
-            return img, 0.0
-        
-        h, w = img.shape[:2]
-        center = (w // 2, h // 2)
-        M = cv2.getRotationMatrix2D(center, median_angle, 1.0)
-        rotated = cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_CUBIC, 
-                                borderMode=cv2.BORDER_REPLICATE)
-        return rotated, median_angle
 
+    @staticmethod
+    def binarize(img: np.ndarray, method: str = "adaptive",
+                 block_size: int = 11, c: int = 2) -> np.ndarray:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img
+        if method == "adaptive":
+            return cv2.adaptiveThreshold(
+                gray, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+                cv2.THRESH_BINARY, block_size, c)
+        if method == "otsu":
+            _, binary = cv2.threshold(gray, 0, 255,
+                                      cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+            return binary
+        _, binary = cv2.threshold(gray, 127, 255, cv2.THRESH_BINARY)
+        return binary
+
+
+# ── contour utilities ─────────────────────────────────────────────────────────
 
 class ShapeDetector:
-    """Detect geometric shapes in binary images."""
-    
     def __init__(self, min_area: int = 100, max_area: int | None = None):
         self.min_area = min_area
-        self.max_area = max_area or (10 ** 6)
-    
+        self.max_area = max_area or 2_000_000
+
     def detect_contours(self, binary: np.ndarray) -> list[np.ndarray]:
-        """Find all contours in binary image."""
-        contours, _ = cv2.findContours(binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
-        return [c for c in contours if self.min_area <= cv2.contourArea(c) <= self.max_area]
-    
-    def detect_outlines(self, contours: list[np.ndarray]) -> list[dict]:
-        """Detect part outlines (closed polygons)."""
-        outlines = []
-        for contour in contours:
-            area = cv2.contourArea(contour)
-            perimeter = cv2.arcLength(contour, True)
-            
-            if perimeter == 0:
+        contours, _ = cv2.findContours(
+            binary, cv2.RETR_LIST, cv2.CHAIN_APPROX_SIMPLE)
+        return [c for c in contours
+                if self.min_area <= cv2.contourArea(c) <= self.max_area]
+
+    @staticmethod
+    def detect_outlines(contours: list[np.ndarray],
+                        epsilon_ratio: float = 0.015) -> list[dict]:
+        out = []
+        for c in contours:
+            peri = cv2.arcLength(c, True)
+            if peri == 0:
                 continue
-            
-            # Approximate contour to polygon
-            epsilon = 0.02 * perimeter
-            approx = cv2.approxPolyDP(contour, epsilon, True)
-            
-            # Check if closed
-            if cv2.isContourConvex(approx) or len(approx) >= 4:
-                points = approx.reshape(-1, 2).tolist()
-                outlines.append({
-                    "points": points,
-                    "closed": True,
-                    "area": area,
-                    "perimeter": perimeter
-                })
-        
-        return outlines
-    
-    def detect_circles(self, binary: np.ndarray) -> list[dict]:
-        """Detect circular holes using Hough Circle Transform."""
-        # Ensure binary is uint8
+            approx = cv2.approxPolyDP(c, epsilon_ratio * peri, True)
+            if len(approx) >= 4 or cv2.isContourConvex(approx):
+                pts = approx.reshape(-1, 2).tolist()
+                if len(pts) >= 3:
+                    out.append({"points": pts, "closed": True,
+                                "area": float(cv2.contourArea(c)),
+                                "perimeter": float(peri)})
+        return sorted(out, key=lambda x: x["area"], reverse=True)
+
+    @staticmethod
+    def detect_circles(binary: np.ndarray, min_r: int = 5, max_r: int = 100
+                       ) -> list[dict]:
         if binary.dtype != np.uint8:
             binary = binary.astype(np.uint8)
-        
-        circles = cv2.HoughCircles(
-            binary, cv2.HOUGH_GRADIENT, dp=1, minDist=30,
-            param1=50, param2=30, minRadius=5, maxRadius=100
-        )
-        
-        holes = []
-        if circles is not None:
-            for circle in circles[0]:
-                cx, cy, r = circle
-                holes.append({
-                    "cx": float(cx),
-                    "cy": float(cy),
-                    "r": float(r),
-                    "area": np.pi * r * r
-                })
-        
-        return holes
-    
-    def detect_lines(self, binary: np.ndarray) -> list[dict]:
-        """Detect straight lines using Hough Line Transform."""
-        # Ensure binary is uint8
+        cs = cv2.HoughCircles(binary, cv2.HOUGH_GRADIENT, dp=1, minDist=20,
+                               param1=50, param2=30, minRadius=min_r,
+                               maxRadius=max_r)
+        if cs is None:
+            return []
+        return [{"cx": float(x), "cy": float(y), "r": float(r),
+                 "area": float(np.pi * r * r)}
+                for x, y, r in cs[0]]
+
+    @staticmethod
+    def detect_lines(binary: np.ndarray) -> list[dict]:
         if binary.dtype != np.uint8:
             binary = binary.astype(np.uint8)
-        
-        edges = cv2.Canny(binary, 50, 150, apertureSize=3)
-        lines = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=50, 
-                                minLineLength=30, maxLineGap=10)
-        
+        edges = cv2.Canny(binary, 50, 150)
+        raw = cv2.HoughLinesP(edges, 1, np.pi / 180, threshold=40,
+                               minLineLength=20, maxLineGap=8)
+        if raw is None:
+            return []
         result = []
-        if lines is not None:
-            for line in lines:
-                x1, y1, x2, y2 = line[0]
-                length = np.sqrt((x2-x1)**2 + (y2-y1)**2)
-                result.append({
-                    "points": [[x1, y1], [x2, y2]],
-                    "length": float(length)
-                })
-        
+        for seg in raw:
+            x1, y1, x2, y2 = seg[0]
+            result.append({"points": [[x1, y1], [x2, y2]],
+                           "length": float(np.hypot(x2 - x1, y2 - y1))})
         return result
-    
-    def detect_polygons(self, contours: list[np.ndarray], max_sides: int = 12) -> list[dict]:
-        """Detect polygonal shapes."""
-        polygons = []
-        for contour in contours:
-            perimeter = cv2.arcLength(contour, True)
-            epsilon = 0.02 * perimeter
-            approx = cv2.approxPolyDP(contour, epsilon, True)
-            
+
+    @staticmethod
+    def detect_polygons(contours: list[np.ndarray],
+                        max_sides: int = 16) -> list[dict]:
+        polys = []
+        for c in contours:
+            peri = cv2.arcLength(c, True)
+            if peri == 0:
+                continue
+            approx = cv2.approxPolyDP(c, 0.02 * peri, True)
             sides = len(approx)
             if 3 <= sides <= max_sides:
-                points = approx.reshape(-1, 2).tolist()
-                area = cv2.contourArea(contour)
-                polygons.append({
-                    "points": points,
-                    "sides": sides,
-                    "area": float(area),
-                    "closed": True
-                })
-        
-        return polygons
+                pts = approx.reshape(-1, 2).tolist()
+                area = float(cv2.contourArea(c))
+                x, y, bw, bh = cv2.boundingRect(approx)
+                fill_ratio = area / (bw * bh + 1e-6)
+                if fill_ratio > 0.2:  # discard very thin artefacts
+                    polys.append({"points": pts, "sides": sides,
+                                  "area": area, "closed": True})
+        return polys
 
+    @staticmethod
+    def detect_ellipses(contours: list[np.ndarray]) -> list[dict]:
+        ellipses = []
+        for c in contours:
+            peri = cv2.arcLength(c, True)
+            if peri == 0 or len(c) < 5:
+                continue
+            try:
+                el = cv2.fitEllipse(c)
+            except cv2.error:
+                continue
+            area_c = cv2.contourArea(c)
+            area_e = np.pi * el[1][0] * el[1][1] / 4
+            if area_e > 0 and 0.5 < area_c / area_e < 2.0:
+                cx, cy = el[0]
+                a, b = el[1]
+                ellipses.append({"cx": float(cx), "cy": float(cy),
+                                  "a": float(a), "b": float(b),
+                                  "angle": float(el[2]),
+                                  "area": float(area_c)})
+        return ellipses
+
+
+# ── DXF ──────────────────────────────────────────────────────────────────────
 
 class DXFGenerator:
-    """Generate DXF files from detected geometry."""
-    
-    # Layer colors (AutoCAD ACI)
     COLORS = {
         "OUTLINE": 1,   # Red
         "HOLE": 7,      # White/Black
         "LINE": 3,      # Green
         "POLYGON": 5,   # Blue
-        "BEND": 6,      # Magenta
+        "ELLIPSE": 4,   # Cyan
     }
-    
+
     def __init__(self):
         self.doc = ezdxf.new(dxfversion="R2010")
-        self.doc.header["$INSUNITS"] = 4  # mm
-        self._setup_layers()
-    
-    def _setup_layers(self):
-        """Create layers with proper colors."""
+        self.doc.header["$INSUNITS"] = 4
         for name, color in self.COLORS.items():
             self.doc.layers.add(name, color=color)
-    
-    def add_outline(self, points: list[list[float]], closed: bool = True):
-        """Add part outline to DXF."""
-        if len(points) < 2:
+
+    def add_outline(self, points, closed=True):
+        if len(points) < 3:
             return
         msp = self.doc.modelspace()
-        msp.add_lwpolyline(points, close=closed, 
-                          dxfattribs={"layer": "OUTLINE"})
-    
-    def add_hole(self, cx: float, cy: float, r: float):
-        """Add circular hole to DXF."""
+        msp.add_lwpolyline(points, close=closed, dxfattribs={"layer": "OUTLINE"})
+
+    def add_hole(self, cx, cy, r):
         msp = self.doc.modelspace()
         msp.add_circle((cx, cy), r, dxfattribs={"layer": "HOLE"})
-    
-    def add_line(self, points: list[list[float]]):
-        """Add straight line to DXF."""
+
+    def add_line(self, points):
         if len(points) < 2:
             return
         msp = self.doc.modelspace()
         msp.add_line(points[0], points[1], dxfattribs={"layer": "LINE"})
-    
-    def add_polygon(self, points: list[list[float]], closed: bool = True):
-        """Add polygon to DXF."""
+
+    def add_polygon(self, points, closed=True):
         if len(points) < 3:
             return
         msp = self.doc.modelspace()
-        msp.add_lwpolyline(points, close=closed, 
-                          dxfattribs={"layer": "POLYGON"})
-    
-    def add_text(self, text: str, position: tuple[float, float], height: float = 2.5):
-        """Add text annotation to DXF."""
+        msp.add_lwpolyline(points, close=closed, dxfattribs={"layer": "POLYGON"})
+
+    def add_ellipse(self, cx: float, cy: float, a: float, b: float,
+                    angle_deg: float = 0.0):
+        """Add ellipse to DXF."""
         msp = self.doc.modelspace()
-        msp.add_text(text, dxfattribs={
-            "layer": "OUTLINE",
-            "height": height,
-            "insert": position
-        })
-    
+        ratio = min(b / a, 1.0) if a > 0 else 1.0
+        rad = math.radians(angle_deg)
+        msp.add_ellipse(
+            (cx, cy),
+            major_axis=(a * math.cos(rad), a * math.sin(rad)),
+            ratio=ratio,
+            dxfattribs={"layer": "ELLIPSE"},
+        )
+
     def save(self, path: str | Path) -> Path:
-        """Save DXF file."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.doc.saveas(str(path))
@@ -304,195 +329,198 @@ class DXFGenerator:
 
 
 class Vectorizer:
-    """Complete image-to-DXF vectorization pipeline. 100% local, no API calls."""
-    
-    def __init__(self, min_area: int = 100, simplify_tolerance: float = 0.02):
-        self.modifier = ImageModifier()
-        self.detector = ShapeDetector(min_area=min_area)
+    """Universal vectorization pipeline — drawing OR photo/pattern mode."""
+
+    def __init__(self, min_area: int = 80, simplify_tolerance: float = 1.5):
+        self.min_area = min_area
         self.simplify_tolerance = simplify_tolerance
-    
+        self.detector = ShapeDetector(min_area=min_area)
+        self._mode: str | None = None
+
     MAX_IMAGE_DIM = 2048
 
-    def preprocess(self, image_path: str | Path, output_dir: str | Path) -> tuple[np.ndarray, np.ndarray]:
-        """Preprocess image for vectorization."""
+    # ── main entry ──────────────────────────────────────────────────────────
+
+    def preprocess(self, image_path: str | Path,
+                   output_dir: str | Path) -> Tuple[np.ndarray, np.ndarray]:
+        """Adaptive preprocessing. Returns (processed_gray_or_edges, binary_map)."""
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        img = self.modifier.load(image_path)
-
+        img = ImageModifier.load(image_path)
         h, w = img.shape[:2]
         (output_dir / "original_size.json").write_text(
-            json.dumps({"width": w, "height": h}), encoding="utf-8"
-        )
+            json.dumps({"width": w, "height": h}), encoding="utf-8")
 
-        max_dim = max(h, w)
-        if max_dim > self.MAX_IMAGE_DIM:
-            scale_px = self.MAX_IMAGE_DIM / max_dim
-            new_w, new_h = int(w * scale_px), int(h * scale_px)
-            img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+        img = _resize_max_dim(img)
+        self._mode = _detect_mode(img)
 
-        enhanced = self.modifier.enhance_contrast(img)
-        enhanced = self.modifier.sharpen(enhanced)
-        deskewed, angle = self.modifier.deskew(enhanced)
-        denoised = self.modifier.denoise(deskewed)
-        
-        # Save preprocessed
-        cv2.imwrite(str(output_dir / "preprocessed.png"), denoised)
-        
-        # Binarize
-        binary = self.modifier.binarize(denoised, method="adaptive")
-        
-        # Ensure dark lines on white background
+        if self._mode == "drawing":
+            return self._preprocess_drawing(img, output_dir)
+        return self._preprocess_photo(img, output_dir)   # also handles patterns
+
+    def _preprocess_drawing(self, img: np.ndarray,
+                            out: Path) -> Tuple[np.ndarray, np.ndarray]:
+        """Classic b/w pipeline for clean scans."""
+        enhanced = _enhance(img)
+        gray = cv2.cvtColor(enhanced, cv2.COLOR_BGR2GRAY)
+        deskewed, _ = _deskew(gray)
+        if deskewed.ndim == 3:
+            deskewed = cv2.cvtColor(deskewed, cv2.COLOR_BGR2GRAY)
+        denoised = cv2.fastNlMeansDenoising(deskewed, h=5, templateWindowSize=5,
+                                            searchWindowSize=5)
+        cv2.imwrite(str(out / "preprocessed.png"), denoised)
+        binary = cv2.adaptiveThreshold(
+            denoised, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+            cv2.THRESH_BINARY, 11, 3)
         if np.mean(binary) < 127:
             binary = cv2.bitwise_not(binary)
-        
-        cv2.imwrite(str(output_dir / "binary.png"), binary)
-        
+        k = np.ones((2, 2), np.uint8)
+        binary = cv2.dilate(binary, k, iterations=1)
+        cv2.imwrite(str(out / "binary.png"), binary)
         return denoised, binary
-    
-    def vectorize(self, image_path: str | Path, output_dir: str | Path,
+
+    def _preprocess_photo(self, img_bgr: np.ndarray,
+                          out: Path) -> Tuple[np.ndarray, np.ndarray]:
+        """Multi-scale Canny edge fusion for photos, renders, patterns."""
+        edges = _preprocess_photo(img_bgr, out)          # writes preprocessed.png
+        # Use the edge map as the "binary" input for contour detection
+        # Dilate edges to make thin 1-pixel lines clickable as contours
+        k = cv2.getStructuringElement(cv2.MORPH_RECT, (2, 2))
+        binary = cv2.dilate(edges, k, iterations=1)
+        cv2.imwrite(str(out / "binary_edges.png"), binary)
+        return edges, binary
+
+    # ── vectorize ───────────────────────────────────────────────────────────
+
+    def vectorize(self, image_path: str | Path,
+                  output_dir: str | Path,
                   scale_factor: float | None = None) -> dict[str, Any]:
-        """Full vectorization pipeline: image → DXF.
-        
-        Args:
-            image_path: Path to input image
-            output_dir: Directory for output files
-            scale_factor: Pixels per mm (None = pixel coordinates)
-        
-        Returns:
-            dict with paths and geometry info
-        """
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # 1. Preprocess
+
         processed, binary = self.preprocess(image_path, output_dir)
-        
-        # 2. Detect shapes
+        is_drawing = (self._mode == "drawing")
+
         contours = self.detector.detect_contours(binary)
-        outlines = self.detector.detect_outlines(contours)
-        holes = self.detector.detect_circles(binary)
-        lines = self.detector.detect_lines(binary)
-        polygons = self.detector.detect_polygons(contours)
-        
-        # 3. Apply scale if provided
+        outlines  = self.detector.detect_outlines(contours, self.simplify_tolerance)
+        holes     = self.detector.detect_circles(binary)
+        lines     = self.detector.detect_lines(binary)
+        polygons  = (self.detector.detect_polygons(contours)
+                     if is_drawing else [])
+        ellipses  = (self.detector.detect_ellipses(contours)
+                     if not is_drawing else [])
+
+        if not polygons and not is_drawing:
+            polygons = self.detector.detect_polygons(contours)
+
         if scale_factor is not None:
-            outlines = self._scale_outlines(outlines, scale_factor)
-            holes = self._scale_holes(holes, scale_factor)
-            lines = self._scale_lines(lines, scale_factor)
-            polygons = self._scale_polygons(polygons, scale_factor)
-        
-        # 4. Generate DXF
+            outlines  = self._scale(outlines, "points", scale_factor)
+            holes     = self._scale(holes, ["cx", "cy", "r"], scale_factor)
+            lines     = self._scale(lines, "points", scale_factor)
+            polygons  = self._scale(polygons, "points", scale_factor)
+            ellipses  = self._scale_ellipses(ellipses, scale_factor)
+
         dxf_gen = DXFGenerator()
-        
-        for outline in outlines:
-            dxf_gen.add_outline(outline["points"], outline["closed"])
-        
-        for hole in holes:
-            dxf_gen.add_hole(hole["cx"], hole["cy"], hole["r"])
-        
-        for line in lines:
-            dxf_gen.add_line(line["points"])
-        
-        for polygon in polygons:
-            dxf_gen.add_polygon(polygon["points"], polygon["closed"])
-        
+        for o in outlines:
+            dxf_gen.add_outline(o["points"], o["closed"])
+        for h in holes:
+            dxf_gen.add_hole(h["cx"], h["cy"], h["r"])
+        for l in lines:
+            dxf_gen.add_line(l["points"])
+        for p in polygons:
+            dxf_gen.add_polygon(p["points"], p["closed"])
+        for el in ellipses:
+            dxf_gen.add_ellipse(el["cx"], el["cy"], el["a"], el["b"], el.get("angle", 0))
+
         dxf_path = dxf_gen.save(output_dir / "drawing.dxf")
-        
-        # 5. Generate review
         review_path = self._write_review(
-            outlines, holes, lines, polygons, 
-            image_path, scale_factor, output_dir / "review.md"
-        )
-        
-        # 6. Save geometry JSON (convert numpy types to Python types)
-        def to_python(obj):
-            if isinstance(obj, (np.integer,)):
-                return int(obj)
-            elif isinstance(obj, (np.floating,)):
-                return float(obj)
-            elif isinstance(obj, np.ndarray):
-                return obj.tolist()
-            elif isinstance(obj, list):
-                return [to_python(x) for x in obj]
-            elif isinstance(obj, dict):
-                return {k: to_python(v) for k, v in obj.items()}
-            return obj
-        
-        geometry = to_python({
-            "outlines": outlines,
-            "holes": holes,
-            "lines": lines,
-            "polygons": polygons,
-            "scale_factor": scale_factor
+            outlines, holes, lines, polygons, ellipses,
+            image_path, scale_factor, output_dir / "review.md")
+
+        geometry = self._to_python({
+            "outlines": outlines, "holes": holes, "lines": lines,
+            "polygons": polygons, "ellipses": ellipses,
+            "scale_factor": scale_factor, "mode": self._mode,
         })
         (output_dir / "geometry.json").write_text(
-            json.dumps(geometry, indent=2), encoding="utf-8"
-        )
-        
+            json.dumps(geometry, indent=2), encoding="utf-8")
+
         return {
-            "dxf": str(dxf_path),
-            "review": str(review_path),
-            "geometry": geometry,
-            "stats": {
-                "outlines": len(outlines),
-                "holes": len(holes),
-                "lines": len(lines),
-                "polygons": len(polygons)
-            }
+            "dxf": str(dxf_path), "review": str(review_path),
+            "geometry": geometry, "stats": {
+                "outlines": len(outlines), "holes": len(holes),
+                "lines": len(lines),  "polygons": len(polygons),
+                "ellipses": len(ellipses),
+            },
         }
-    
-    def _scale_outlines(self, outlines: list[dict], factor: float) -> list[dict]:
-        for outline in outlines:
-            outline["points"] = [[x * factor, y * factor] for x, y in outline["points"]]
-        return outlines
-    
-    def _scale_holes(self, holes: list[dict], factor: float) -> list[dict]:
-        for hole in holes:
-            hole["cx"] *= factor
-            hole["cy"] *= factor
-            hole["r"] *= factor
-        return holes
-    
-    def _scale_lines(self, lines: list[dict], factor: float) -> list[dict]:
-        for line in lines:
-            line["points"] = [[x * factor, y * factor] for x, y in line["points"]]
-        return lines
-    
-    def _scale_polygons(self, polygons: list[dict], factor: float) -> list[dict]:
-        for poly in polygons:
-            poly["points"] = [[x * factor, y * factor] for x, y in poly["points"]]
-        return polygons
-    
-    def _write_review(self, outlines, holes, lines, polygons, 
-                      image_path, scale_factor, output_path: Path) -> Path:
-        """Write review report."""
-        coord_mode = f"{scale_factor:.4f} px/mm (real units)" if scale_factor else "pixel space"
-        
-        lines_md = [
+
+    # ── scaling helpers ──────────────────────────────────────────────────────
+
+    @staticmethod
+    def _scale(items: list[dict], keys, sf: float) -> list[dict]:
+        result = []
+        for item in items:
+            item = dict(item)
+            for k in (keys if isinstance(keys, list) else [keys]):
+                if k not in item:
+                    continue
+                v = item[k]
+                if isinstance(v, list) and v and isinstance(v[0], list):
+                    item[k] = [[x * sf for x in pt] for pt in v]
+                elif isinstance(v, (int, float)):
+                    item[k] = v * sf
+            result.append(item)
+        return result
+
+    @staticmethod
+    def _scale_ellipses(ells, sf):
+        return [{**e, "cx": e["cx"] * sf, "cy": e["cy"] * sf,
+                 "a": e["a"] * sf, "b": e["b"] * sf} for e in ells]
+
+    @staticmethod
+    def _to_python(obj):
+        if isinstance(obj, np.integer):
+            return int(obj)
+        if isinstance(obj, np.floating):
+            return float(obj)
+        if isinstance(obj, np.ndarray):
+            return obj.tolist()
+        if isinstance(obj, list):
+            return [Vectorizer._to_python(x) for x in obj]
+        if isinstance(obj, dict):
+            return {k: Vectorizer._to_python(v) for k, v in obj.items()}
+        return obj
+
+    # ── review ──────────────────────────────────────────────────────────────
+
+    def _write_review(self, outlines, holes, lines, polygons, ellipses,
+                      image_path, scale_factor, out: Path) -> Path:
+        coord = f"{scale_factor:.4f} px/mm (real units)" if scale_factor else "pixel space"
+        mode_label = {"drawing": "Drawing/Scan", "photo": "Photo/Pattern"}.get(
+            self._mode or "", "Auto")
+        md = [
             f"# DXF Vectorization Review — {Path(image_path).name}",
-            f"\n**Mode:** Local OpenCV (no API)  |  **Coords:** {coord_mode}",
+            f"\n**Mode:** {mode_label}  |  **Coords:** {coord}",
             "\n## Geometry detected\n",
-            "| Entity type | Count | Layer |",
-            "|-------------|-------|-------|",
-            f"| Outlines    | {len(outlines):>5} | OUTLINE |",
-            f"| Holes       | {len(holes):>5} | HOLE |",
-            f"| Lines       | {len(lines):>5} | LINE |",
-            f"| Polygons    | {len(polygons):>5} | POLYGON |",
-            "\n## Features\n",
-            "- 100% local processing (no API calls)",
-            "- Automatic edge detection and contour extraction",
-            "- Shape classification (outlines, holes, lines, polygons)",
-            "- DXF layers for CAD/CAM workflows",
+            "| Entity  | Count | Layer |",
+            "|---------|-------|-------|",
+            f"| Outlines| {len(outlines):>5} | OUTLINE |",
+            f"| Holes   | {len(holes):>5} | HOLE |",
+            f"| Lines   | {len(lines):>5} | LINE |",
+            f"| Polygons| {len(polygons):>5} | POLYGON |",
+            f"| Ellipses| {len(ellipses):>5} | ELLIPSE |",
+            "\n## Mode details\n",
+            f"- **{mode_label} mode**: uses {('adaptive threshold' if self._mode == 'drawing' else 'multi-scale Canny edge fusion')}",
+            "- 100% local OpenCV processing",
+            "- DXF layers: OUTLINE, HOLE, LINE, POLYGON, ELLIPSE",
         ]
-        
-        output_path.write_text("\n".join(lines_md), encoding="utf-8")
-        return output_path
+        out.write_text("\n".join(md), encoding="utf-8")
+        return out
 
 
-# Convenience function
 def vectorize_image(image_path: str | Path, output_dir: str | Path,
                     scale_factor: float | None = None, **kwargs) -> dict:
-    """One-call vectorization. No API keys needed."""
+    """One-call vectorization. Detects image type automatically."""
     vec = Vectorizer(**kwargs)
     return vec.vectorize(image_path, output_dir, scale_factor)
