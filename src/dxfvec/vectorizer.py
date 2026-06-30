@@ -65,9 +65,9 @@ class ImageModifier:
         return cv2.cvtColor(lab, cv2.COLOR_LAB2BGR)
     
     @staticmethod
-    def denoise(img: np.ndarray, strength: int = 10) -> np.ndarray:
-        """Remove noise while preserving edges."""
-        return cv2.fastNlMeansDenoisingColored(img, None, strength, strength, 7, 21)
+    def denoise(img: np.ndarray, strength: int = 5) -> np.ndarray:
+        """Remove noise while preserving edges. Uses light params for web/container use."""
+        return cv2.fastNlMeansDenoisingColored(img, None, strength, strength, 5, 5)
     
     @staticmethod
     def sharpen(img: np.ndarray) -> np.ndarray:
@@ -103,7 +103,7 @@ class ImageModifier:
         """Correct document rotation using Hough lines. Returns corrected image and angle."""
         gray = ImageModifier.to_grayscale(img)
         edges = cv2.Canny(gray, 50, 150, apertureSize=3)
-        lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=100)
+        lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=50)
         
         if lines is None:
             return img, 0.0
@@ -176,7 +176,7 @@ class ShapeDetector:
         
         circles = cv2.HoughCircles(
             binary, cv2.HOUGH_GRADIENT, dp=1, minDist=30,
-            param1=50, param2=30, minRadius=10, maxRadius=200
+            param1=50, param2=30, minRadius=5, maxRadius=100
         )
         
         holes = []
@@ -296,13 +296,10 @@ class DXFGenerator:
         })
     
     def save(self, path: str | Path) -> Path:
-        """Save DXF file and validate."""
+        """Save DXF file."""
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         self.doc.saveas(str(path))
-        
-        # Validate
-        ezdxf.readfile(str(path))
         return path
 
 
@@ -314,28 +311,29 @@ class Vectorizer:
         self.detector = ShapeDetector(min_area=min_area)
         self.simplify_tolerance = simplify_tolerance
     
+    MAX_IMAGE_DIM = 2048
+
     def preprocess(self, image_path: str | Path, output_dir: str | Path) -> tuple[np.ndarray, np.ndarray]:
         """Preprocess image for vectorization."""
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
-        
-        # Load
+
         img = self.modifier.load(image_path)
-        
-        # Save original dimensions
+
         h, w = img.shape[:2]
         (output_dir / "original_size.json").write_text(
             json.dumps({"width": w, "height": h}), encoding="utf-8"
         )
-        
-        # Enhance
+
+        max_dim = max(h, w)
+        if max_dim > self.MAX_IMAGE_DIM:
+            scale_px = self.MAX_IMAGE_DIM / max_dim
+            new_w, new_h = int(w * scale_px), int(h * scale_px)
+            img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
         enhanced = self.modifier.enhance_contrast(img)
         enhanced = self.modifier.sharpen(enhanced)
-        
-        # Deskew
         deskewed, angle = self.modifier.deskew(enhanced)
-        
-        # Denoise
         denoised = self.modifier.denoise(deskewed)
         
         # Save preprocessed

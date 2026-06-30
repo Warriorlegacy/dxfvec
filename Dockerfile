@@ -26,4 +26,4 @@ RUN pip install --no-cache-dir -e .
 EXPOSE 5000
 
 # Run with gunicorn for production
-CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "2", "--timeout", "120", "dxfvec.web:app"]
+CMD ["gunicorn", "--bind", "0.0.0.0:5000", "--workers", "1", "--timeout", "300", "dxfvec.web:app"]

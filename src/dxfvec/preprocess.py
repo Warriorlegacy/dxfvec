@@ -34,7 +34,7 @@ def preprocess(image_path: str | Path, output_path: str | Path) -> np.ndarray:
     enhanced = clahe.apply(gray)
 
     # 2. Denoise while preserving edges
-    denoised = cv2.fastNlMeansDenoising(enhanced, h=10, templateWindowSize=7, searchWindowSize=21)
+    denoised = cv2.fastNlMeansDenoising(enhanced, h=5, templateWindowSize=5, searchWindowSize=5)
 
     # 3. Deskew
     deskewed = _deskew(denoised)

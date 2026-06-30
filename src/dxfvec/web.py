@@ -5,11 +5,12 @@ Usage:
   # Then open http://localhost:5000
   
 Production:
-  gunicorn --bind 0.0.0.0:5000 --workers 2 dxfvec.web:app
+  gunicorn --bind 0.0.0.0:5000 --workers 1 dxfvec.web:app
 """
 from __future__ import annotations
 
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -21,6 +22,21 @@ CORS(app)
 
 # Max upload size: 10MB
 app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
+
+DOWNLOAD_DIR = Path(tempfile.gettempdir()) / "dxfvec_downloads"
+MAX_IMAGE_DIM = 2048
+DOWNLOAD_TTL_SECONDS = 3600
+
+
+def _cleanup_old_downloads():
+    try:
+        if DOWNLOAD_DIR.exists():
+            now = time.time()
+            for f in DOWNLOAD_DIR.iterdir():
+                if f.is_file() and (now - f.stat().st_mtime) > DOWNLOAD_TTL_SECONDS:
+                    f.unlink(missing_ok=True)
+    except Exception:
+        pass
 
 HTML_TEMPLATE = """
 <!DOCTYPE html>
@@ -232,20 +248,42 @@ def health():
 def convert():
     if "image" not in request.files:
         return jsonify({"error": "No image uploaded"}), 400
-    
+
     file = request.files["image"]
     if not file.filename:
         return jsonify({"error": "No file selected"}), 400
-    
+
+    _cleanup_old_downloads()
+
+    DOWNLOAD_DIR.mkdir(exist_ok=True)
+
     scale = request.form.get("scale", "").strip() or None
     min_area = int(request.form.get("min-area", 100))
-    
-    # Save uploaded file
+
+    try:
+        import cv2
+        import numpy as np
+    except ImportError:
+        return jsonify({"error": "Server misconfigured: OpenCV not available"}), 500
+
     with tempfile.TemporaryDirectory() as tmpdir:
         input_path = Path(tmpdir) / file.filename
         file.save(str(input_path))
-        
-        # Parse scale
+
+        img = cv2.imread(str(input_path))
+        if img is None:
+            return jsonify({"error": "Cannot load image — unsupported format"}), 400
+
+        h, w = img.shape[:2]
+        max_dim = max(h, w)
+        if max_dim > MAX_IMAGE_DIM:
+            scale_px = MAX_IMAGE_DIM / max_dim
+            new_w, new_h = int(w * scale_px), int(h * scale_px)
+            img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+            resized_path = Path(tmpdir) / f"resized_{file.filename}"
+            cv2.imwrite(str(resized_path), img)
+            input_path = resized_path
+
         scale_factor = None
         if scale:
             import re
@@ -262,11 +300,10 @@ def convert():
                     elif unit == "cm":
                         real *= 10
                     scale_factor = px / real
-        
-        # Convert
+
         from .vectorizer import vectorize_image
         output_dir = Path(tmpdir) / "output"
-        
+
         try:
             result = vectorize_image(
                 input_path, output_dir,
@@ -274,32 +311,36 @@ def convert():
                 min_area=min_area
             )
         except Exception as e:
-            return jsonify({"error": str(e)}), 500
-        
-        # Create zip for download
+            return jsonify({"error": f"Vectorization error: {e}"}), 500
+
         dxf_path = Path(result["dxf"])
+        if not dxf_path.exists():
+            return jsonify({"error": "DXF generation failed"}), 500
+
         zip_path = Path(tmpdir) / "result.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.write(dxf_path, dxf_path.name)
-            zf.write(Path(result["review"]), "review.md")
-        
-        # Save zip for download
-        download_dir = Path(tmpdir).parent / "dxfvec_downloads"
-        download_dir.mkdir(exist_ok=True)
-        final_zip = download_dir / f"{input_path.stem}.zip"
+            review_src = Path(result["review"])
+            if review_src.exists():
+                zf.write(review_src, "review.md")
+
+        final_zip = DOWNLOAD_DIR / f"{input_path.stem}.zip"
         final_zip.write_bytes(zip_path.read_bytes())
-    
+
     return jsonify({
         "filename": final_zip.name,
         "stats": result["stats"]
     })
 
+@app.route("/favicon.ico")
+def favicon():
+    return "", 204
+
 @app.route("/download/<filename>")
 def download(filename):
-    download_dir = Path(tempfile.gettempdir()) / "dxfvec_downloads"
-    file_path = download_dir / filename
+    file_path = DOWNLOAD_DIR / filename
     if not file_path.exists():
-        return jsonify({"error": "File not found"}), 404
+        return jsonify({"error": "File not found — it may have expired. Please reconvert."}), 404
     return send_file(file_path, as_attachment=True, download_name=filename)
 
 def main():
