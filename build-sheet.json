@@ -1,0 +1,65 @@
+{
+  "meta": {
+    "problem": "Convert raster images of metal engineering drawings (scans, photos, hand-sketched templates) into layered DXF files for metal fabrication shops.",
+    "created": "2026-06-30",
+    "skill_version": "0.2",
+    "mode": "standalone CLI (no CMA dependency)"
+  },
+  "multi_provider": {
+    "abstraction": "litellm",
+    "providers": {
+      "google":    "gemini/gemini-2.5-flash",
+      "openai":    "openai/gpt-4o",
+      "ollama":    "ollama/llava",
+      "azure":     "azure/gpt-4o",
+      "anthropic": "anthropic/claude-opus-4-6"
+    },
+    "default": "google",
+    "note": "Any LiteLLM model string is accepted. Pass via --provider CLI flag or provider= kwarg."
+  },
+  "pipeline": {
+    "steps": [
+      "Preprocess image (OpenCV: grayscale, CLAHE, denoise, deskew, binarise)",
+      "Analyze geometry via vision LLM (outlines, holes, bends, dimensions)",
+      "Apply optional scale (pixel → mm conversion)",
+      "Generate layered DXF (ezdxf: CUT, BEND, DIM layers)",
+      "Validate with ezdxf.readfile()",
+      "Write review.md"
+    ]
+  },
+  "cli": {
+    "package": "dxfvec",
+    "entrypoint": "src/",
+    "commands": {
+      "convert": "dxfvec convert <image> --provider <provider> --scale <scale> --mode pipeline|crew",
+      "providers": "dxfvec providers"
+    },
+    "install": "pip install -e .",
+    "tested_providers": ["google (gemini-2.5-flash)"]
+  },
+  "evals": {
+    "cases": [
+      {
+        "name": "case-01",
+        "input": "evals/case-01/test_drawing.png (generated)",
+        "expected": "CUT=3 (1 outline + 2 holes), BEND=1, DIM=3, review.md clean",
+        "last_verdict": "PASS (gemini-2.5-flash, 2026-06-30)"
+      },
+      {
+        "name": "case-02",
+        "input": "First real shop scan",
+        "expected": "Engineer-validated DXF",
+        "last_verdict": null
+      }
+    ]
+  },
+  "next_directions": [
+    {"version": "done", "what": "Gemini provider validated", "why": "Full pipeline tested end-to-end", "how": "dxfvec convert --provider google"},
+    {"version": "done", "what": "Scale calibration", "why": "Pixel-to-mm conversion working", "how": "--scale '64px=20mm' CLI flag"},
+    {"version": "v1", "what": "OpenAI GPT-4o provider", "why": "No API key on hand yet", "how": "OPENAI_API_KEY=... dxfvec convert --provider openai"},
+    {"version": "v1", "what": "Batch mode", "why": "v0 proves single-image quality first", "how": "dxfvec batch ./drawings/ --provider google"},
+    {"version": "v1", "what": "Ollama/LLaVA local provider", "why": "Needs Ollama installed locally", "how": "dxfvec convert --provider ollama"},
+    {"version": "v2", "what": "CMA cloud deployment", "why": "Needs ANTHROPIC_API_KEY", "how": "See cma/ directory"},
+    {"version": "v2", "what": "Per-customer deployment", "why": "Needs UI + vault-per-user", "how": "CMA vault per customer"}
+  ]
+}

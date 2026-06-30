@@ -1,0 +1,16 @@
+Convert the metal engineering drawing attached to this session to a layered DXF file.
+
+The drawing is a test case containing:
+- A rectangular part outline
+- Two circular holes (Ø20mm each)
+- A dashed center / bend line
+- Dimension annotations (width and height)
+
+Scale hint: the drawing was scanned at 3.2 pixels per mm. Apply this scale to all coordinates so the DXF uses real-world millimeters.
+
+Produce the following outputs in /mnt/session/outputs/:
+  drawing.dxf          — vectorized DXF with CUT, BEND, and DIM layers (real mm coordinates)
+  review.md            — detection report (entity table, confidence, ambiguities, scale info)
+  preprocessed.png     — the preprocessed image used for analysis
+
+Validate that drawing.dxf opens without errors before finishing.

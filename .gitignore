@@ -1,0 +1,13 @@
+.env
+IDS.env
+*.txt.bak
+output/
+__pycache__/
+*.pyc
+*.pyo
+.pytest_cache/
+dist/
+build/
+*.egg-info/
+
+.vercel

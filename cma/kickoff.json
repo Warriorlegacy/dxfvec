@@ -1,0 +1,13 @@
+{
+  "events": [
+    {
+      "type": "user.define_outcome",
+      "description": "Convert the metal engineering drawing attached to this session to a layered DXF file.\n\nThe drawing contains: a rectangular part outline, two circular holes (Ø20mm), a dashed bend line, and dimension annotations.\n\nOutputs expected in /mnt/session/outputs/:\n  drawing.dxf       — CUT / BEND / DIM layers\n  review.md         — entity table, confidence, ambiguities\n  preprocessed.png  — the preprocessed image\n\nValidate drawing.dxf with ezdxf.readfile() before finishing.",
+      "rubric": {
+        "type": "text",
+        "content": "1. drawing.dxf exists and ezdxf.readfile() succeeds\n2. At least one closed LWPOLYLINE on the CUT layer (part outline)\n3. All visible holes as CIRCLE entities on the CUT layer\n4. BEND layer present with fold lines OR review.md states 'no bend lines detected'\n5. review.md exists with entity count table, confidence level, and ambiguities list"
+      },
+      "max_iterations": 3
+    }
+  ]
+}

@@ -1,0 +1,19 @@
+{
+  "name": "dxf-vectorizer-env",
+  "config": {
+    "type": "cloud",
+    "networking": {"type": "unrestricted"},
+    "packages": {
+      "pip": [
+        "opencv-python",
+        "Pillow",
+        "numpy",
+        "ezdxf",
+        "scikit-image",
+        "litellm",
+        "crewai",
+        "click"
+      ]
+    }
+  }
+}

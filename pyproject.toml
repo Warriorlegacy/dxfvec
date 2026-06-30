@@ -1,0 +1,30 @@
+[build-system]
+requires = ["setuptools>=72", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "dxfvec"
+version = "1.0.0"
+description = "100% free image vectorization and DXF conversion — no API keys required"
+readme = "README.md"
+requires-python = ">=3.10"
+license = {text = "Apache-2.0"}
+keywords = ["dxf", "cad", "vectorization", "engineering", "metal-fabrication", "opencv", "free"]
+dependencies = [
+    "opencv-python>=4.9",
+    "Pillow>=10",
+    "numpy>=1.26",
+    "ezdxf>=1.3",
+    "scikit-image>=0.22",
+    "click>=8.1",
+]
+
+[project.optional-dependencies]
+web = ["flask>=3.0"]
+crew = ["crewai>=0.55", "litellm>=1.40"]
+
+[project.scripts]
+dxfvec = "dxfvec.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]

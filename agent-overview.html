@@ -1,0 +1,360 @@
+<!doctype html>
+<!-- dxf-vectorizer — agent schema overview -->
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>dxf-vectorizer — agent schema</title>
+<style>
+  :root {
+    --bg:#faf9f5; --panel:#ffffff; --inset:#f0eee6; --ink:#141413; --body:#3d3d3a; --sub:#73726c; --mut:#9c9a92;
+    --hairline:rgba(20,20,19,.12); --hairline-soft:rgba(20,20,19,.07);
+    --live:#22865c; --live-bright:#1d7a52; --clay:#ad5724; --amber:#9a7d24; --ghost:#b0aea5;
+    --mono:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+         background:var(--bg); color:var(--body); font-size:14px; line-height:1.5;
+         background-image:linear-gradient(rgba(20,20,19,.045) 1px,transparent 1px),
+                          linear-gradient(90deg,rgba(20,20,19,.045) 1px,transparent 1px);
+         background-size:46px 46px; }
+  .wrap { max-width:1320px; margin:0 auto; padding:0 22px 44px; }
+  @keyframes ledPulse { 0%,100%{opacity:1;box-shadow:0 0 0 0 rgba(34,134,92,.45);}50%{opacity:.55;box-shadow:0 0 0 5px rgba(34,134,92,0);} }
+
+  .topbar { position:sticky;top:0;z-index:30;display:flex;align-items:center;justify-content:space-between;gap:18px;
+            background:rgba(250,249,245,.92);backdrop-filter:blur(16px);border-bottom:1px solid var(--hairline);
+            padding:12px 22px;margin:0 -22px; }
+  .ident { display:flex;align-items:center;gap:12px;min-width:0; }
+  .sigil { width:36px;height:36px;flex:none;display:flex;align-items:center;justify-content:center;border-radius:9px;
+           background:rgba(34,134,92,.10);border:1px solid rgba(34,134,92,.35);font-size:18px; }
+  h1 { margin:0;font-size:19px;font-weight:600;color:var(--ink);letter-spacing:-.01em; }
+  .statepill { display:inline-flex;align-items:center;gap:7px;padding:3px 11px;border-radius:999px;font-family:var(--mono);
+               font-size:11px;letter-spacing:.08em; }
+  .statepill.planned { background:var(--inset);border:1px solid var(--hairline);color:var(--sub); }
+  .statepill.live { background:rgba(34,134,92,.10);border:1px solid rgba(34,134,92,.35);color:var(--live-bright); }
+  .led { width:7px;height:7px;border-radius:50%; }
+  .led.planned { background:transparent;border:1.5px solid var(--ghost); }
+  .led.live { background:var(--live);animation:ledPulse 2s ease-in-out infinite; }
+  .byline { font-family:var(--mono);font-size:11.5px;color:var(--mut);margin-top:3px; }
+  .stats { display:flex;align-items:stretch;flex:none; }
+  .stat { padding:0 16px;border-left:1px solid var(--hairline); }
+  .stat:first-child { border-left:none; }
+  .stat-k { font-family:var(--mono);font-size:10px;letter-spacing:.13em;text-transform:uppercase;color:var(--mut); }
+  .stat-v { font-family:var(--mono);font-size:13.5px;color:var(--ink);margin-top:3px;white-space:nowrap; }
+  .stat-v .dim { color:var(--sub); }
+  .problem { margin:14px 2px 0;color:var(--sub);font-size:13.5px;max-width:95ch; }
+
+  .lane-label { margin:18px 2px 8px;font-family:var(--mono);font-size:10.5px;letter-spacing:.16em;text-transform:uppercase;color:var(--mut); }
+  .pipeline { display:grid;grid-template-columns:minmax(220px,1fr) 28px minmax(340px,1.6fr) 28px minmax(260px,1.15fr);gap:12px;align-items:stretch; }
+  .col { display:flex;flex-direction:column;gap:12px;min-width:0; }
+  .col > .grow { flex:1;display:flex;flex-direction:column; }
+  .col > .grow .node-body { flex:1; }
+  .col-title { font-family:var(--mono);font-size:10px;letter-spacing:.16em;text-transform:uppercase;color:var(--sub);margin:0 0 -2px 2px; }
+  .joint { display:flex;align-items:center;justify-content:center; }
+  .joint::before { content:"";width:100%;height:1.5px;background:linear-gradient(90deg,var(--hairline),rgba(34,134,92,.5));
+                   clip-path:polygon(0 0,calc(100% - 8px) 0,calc(100% - 8px) -5px,100% 50%,calc(100% - 8px) 250%,calc(100% - 8px) 100%,0 100%); }
+
+  .node { background:var(--panel);border:1px solid var(--hairline);border-radius:12px;overflow:hidden;display:flex;flex-direction:column; }
+  .node.key { border-color:rgba(34,134,92,.30); }
+  .node.ghost { border-style:dashed;background:transparent;opacity:.62; }
+  .node-head { display:flex;align-items:center;gap:9px;padding:11px 14px;border-bottom:1px solid var(--hairline-soft); }
+  .node-icon { font-size:16px;line-height:1; }
+  .node-head h2 { margin:0;font-size:14.5px;font-weight:600;color:var(--ink); }
+  .node-meta { margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--mut);background:var(--inset);
+               border:1px solid var(--hairline);border-radius:6px;padding:3px 8px;white-space:nowrap;
+               max-width:60%;overflow:hidden;text-overflow:ellipsis; }
+  .node-meta b { color:var(--live-bright);font-weight:500; }
+  .node-body { padding:11px 14px 13px; }
+  .node-body p { margin:.3em 0; }
+  .node-foot { margin-top:auto;padding:9px 14px 11px;border-top:1px dashed var(--hairline-soft);color:var(--sub);font-size:12.5px; }
+  .field { margin:9px 0; }
+  .field:first-child { margin-top:2px; }
+  .field-k { font-family:var(--mono);font-size:10px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut);margin-bottom:3px; }
+  .sub { color:var(--sub); } .small { font-size:13px; }
+  strong { color:var(--ink);font-weight:600; }
+  code,.mono { font-family:var(--mono);font-size:12.5px;background:var(--inset);border:1px solid var(--hairline-soft);
+               padding:1px 6px;border-radius:5px;color:var(--body); }
+  .tag { display:inline-block;padding:2px 8px;border-radius:6px;font-size:12px;margin:2px 4px 2px 0;
+         background:var(--inset);border:1px solid var(--hairline);color:var(--sub);font-family:var(--mono); }
+  .tag.on { color:var(--ink);border-color:rgba(173,87,36,.5); }
+  .tag.good { color:var(--live-bright);border-color:rgba(34,134,92,.40); }
+
+  .env-frame { border:1px dashed rgba(20,20,19,.18);border-radius:15px;padding:11px;
+               display:flex;flex-direction:column;gap:11px;background:rgba(20,20,19,.03);height:100%; }
+  .env-tab { align-self:flex-start;max-width:100%;background:var(--bg);
+             border:1px dashed rgba(20,20,19,.2);border-radius:10px;padding:4px 11px;line-height:1.5;
+             font-family:var(--mono);font-size:11px;color:var(--sub);overflow-wrap:anywhere; }
+  .attach-grid { display:grid;grid-template-columns:1fr 1fr;gap:9px; }
+  .attach { background:var(--inset);border:1px solid var(--hairline-soft);border-radius:10px;padding:10px 12px; }
+  .attach.ghost { border-style:dashed;opacity:.58; }
+  .attach h3 { margin:0 0 4px;font-size:13px;color:var(--ink);display:flex;gap:7px;align-items:center; }
+  .attach p { margin:0;font-size:12.5px;color:var(--sub); }
+
+  ul,ol { margin:.3em 0 .3em 1.15em;padding:0; } li { margin:.3em 0;font-size:13px; }
+  ol.rubric { list-style:none;margin-left:0;counter-reset:rb; }
+  ol.rubric li { display:flex;gap:9px;counter-increment:rb;align-items:flex-start; }
+  ol.rubric li::before { content:counter(rb);flex:none;width:19px;height:19px;border-radius:5px;background:var(--inset);
+                         border:1px solid var(--hairline);display:flex;align-items:center;justify-content:center;
+                         font-family:var(--mono);font-size:11px;color:var(--live-bright);margin-top:1px; }
+
+  .lane-grid { display:grid;grid-template-columns:1.1fr 1fr;gap:12px;margin-top:12px; }
+  .lane { background:var(--panel);border:1px solid var(--hairline);border-radius:12px;overflow:hidden;display:flex;flex-direction:column; }
+  .lane.full { margin-top:12px; }
+  .lane-head { display:flex;align-items:center;gap:9px;padding:11px 14px;border-bottom:1px solid var(--hairline-soft); }
+  .lane-head h2 { margin:0;font-size:14.5px;font-weight:600;color:var(--ink); }
+  .lane-meta { margin-left:auto;font-family:var(--mono);font-size:11px;color:var(--mut); }
+  .lane-body { padding:10px 14px 12px; }
+  .overflow { overflow-x:auto; }
+  table { width:100%;border-collapse:collapse;font-size:13px; }
+  th { text-align:left;font-family:var(--mono);font-size:10px;text-transform:uppercase;letter-spacing:.1em;color:var(--mut);
+       border-bottom:1px solid var(--hairline);padding:5px 8px; }
+  td { padding:6px 8px;border-bottom:1px solid var(--hairline-soft);vertical-align:top; }
+  tr:last-child td { border-bottom:none; }
+
+  .rail { display:grid;grid-template-columns:repeat(auto-fit,minmax(220px,1fr));gap:11px; }
+  .ver { background:var(--inset);border:1px solid var(--hairline);border-radius:10px;padding:11px 13px; }
+  .ver-tag { font-family:var(--mono);font-size:11px;color:var(--clay);margin-bottom:4px; }
+  .ver-what { font-weight:600;font-size:13.5px;color:var(--ink); }
+  .ver-why { color:var(--sub);font-size:12.5px;margin:3px 0; }
+  .ver-how { font-size:12.5px; } .ver-how::before { content:"How: ";color:var(--clay);font-weight:600; }
+
+  a.console { color:var(--live-bright);text-decoration:none;border-bottom:1px dotted rgba(34,134,92,.5); }
+  a.console:hover { border-bottom-style:solid; }
+  footer { padding:20px 2px 0;color:var(--mut);font-family:var(--mono);font-size:11px; }
+  footer a { color:var(--sub); }
+
+  @media (max-width:1020px) {
+    .pipeline { grid-template-columns:1fr; }
+    .joint { height:26px; }
+    .joint::before { width:1.5px;height:100%;background:linear-gradient(180deg,var(--hairline),rgba(34,134,92,.5));
+                     clip-path:polygon(0 0,100% 0,100% calc(100% - 8px),250% calc(100% - 8px),50% 100%,-150% calc(100% - 8px),0 calc(100% - 8px)); }
+    .lane-grid { grid-template-columns:1fr; }
+    .stats { display:none; }
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <div class="topbar">
+    <div class="ident">
+      <div class="sigil">🏭</div>
+      <div>
+        <div style="display:flex;align-items:center;gap:10px;flex-wrap:wrap;">
+          <h1>dxf-vectorizer</h1>
+          <span class="statepill planned"><span class="led planned"></span>○ PLANNED · NOT LAUNCHED</span>
+        </div>
+        <div class="byline">Claude Managed Agent + Standalone CLI · created 2026-06-30</div>
+      </div>
+    </div>
+    <div class="stats">
+      <div class="stat"><div class="stat-k">Model</div><div class="stat-v">claude-opus-4-8</div></div>
+      <div class="stat"><div class="stat-k">Providers</div><div class="stat-v">Anthropic · OpenAI · Google · Ollama</div></div>
+      <div class="stat"><div class="stat-k">Mode</div><div class="stat-v">on-demand <span class="dim">▶️</span></div></div>
+      <div class="stat"><div class="stat-k">Agent</div><div class="stat-v"><span class="dim">at launch</span></div></div>
+    </div>
+  </div>
+
+  <p class="problem">Convert raster images of metal engineering drawings — scans, photos, hand-sketched templates — into layered DXF files for CAD review and CNC / laser-cutting operations.</p>
+
+  <p class="lane-label">System schema</p>
+  <div class="pipeline">
+
+    <!-- Trigger -->
+    <div class="col">
+      <p class="col-title">Trigger</p>
+      <div class="node key grow">
+        <div class="node-head"><span class="node-icon">▶️</span><h2>On-demand session</h2><span class="node-meta">manual · LAUNCH.md</span></div>
+        <div class="node-body">
+          <div class="field">
+            <div class="field-k">How to run — CMA</div>
+            <p class="small">Upload image via Files API → create session with file resource → kickoff with <code>user.define_outcome</code>.</p>
+          </div>
+          <div class="field">
+            <div class="field-k">How to run — standalone CLI</div>
+            <p class="small"><code>dxfvec convert drawing.png --provider anthropic</code><br>
+            or <code>--provider openai</code> / <code>google</code> / <code>ollama</code></p>
+          </div>
+          <div class="field">
+            <div class="field-k">How to run — multi-agent</div>
+            <p class="small"><code>dxfvec convert drawing.png --mode crew</code><br>
+            Three CrewAI agents: Vision Analyst → DXF Builder → QA Reviewer</p>
+          </div>
+        </div>
+        <div class="node-foot">No schedule — each drawing is an independent on-demand run.</div>
+      </div>
+    </div>
+
+    <div class="joint" aria-hidden="true"></div>
+
+    <!-- Worker -->
+    <div class="col">
+      <p class="col-title">Worker</p>
+      <div class="env-frame">
+        <span class="env-tab">📦 environment · type: cloud · networking: unrestricted · packages: opencv-python · Pillow · numpy · ezdxf · scikit-image · litellm · crewai</span>
+
+        <div class="node key">
+          <div class="node-head"><span class="node-icon">🤖</span><h2>dxf-vectorizer</h2><span class="node-meta"><b>claude-opus-4-8</b> · v1 at launch</span></div>
+          <div class="node-body">
+            <div class="field"><div class="field-k">system · the job</div>
+              <p class="small">Preprocesses the input image (OpenCV), extracts geometry (vision LLM via LiteLLM), generates a layered DXF (ezdxf), validates it, and writes <code>review.md</code>.</p></div>
+            <div class="field"><div class="field-k">system · never-dos</div>
+              <p class="small sub">Never guess dimensions · never mark a line BEND unless clearly dashed · never drop geometry silently · always validate DXF before finishing.</p></div>
+          </div>
+        </div>
+
+        <div class="attach-grid">
+          <div class="attach">
+            <h3>🛠️ Tools</h3>
+            <p><code>tools[] · agent_toolset_20260401</code><br>
+            <span class="tag on">bash</span><span class="tag on">write</span><span class="tag on">read</span><span class="tag">web_search</span><span class="tag">glob</span><span class="tag">grep</span></p>
+          </div>
+          <div class="attach">
+            <h3>📄 Pipeline modes</h3>
+            <p>
+              <span class="tag on">pipeline</span> single LiteLLM vision call<br>
+              <span class="tag on">crew</span> CrewAI 3-agent chain<br>
+              <span class="tag on">any provider</span> via LiteLLM abstraction
+            </p>
+          </div>
+          <div class="attach ghost">
+            <h3>🔌 Connectors &amp; 🔐 Vaults</h3>
+            <p><code>mcp_servers[]</code> + <code>vault_ids[]</code> — empty in v0. Per-customer vault in v2.</p>
+          </div>
+          <div class="attach ghost">
+            <h3>🧠 Memory store</h3>
+            <p>Not in v0 — each drawing is independent. Per-customer history in v2.</p>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <div class="joint" aria-hidden="true"></div>
+
+    <!-- Output & grading -->
+    <div class="col">
+      <p class="col-title">Output &amp; grading</p>
+
+      <div class="node">
+        <div class="node-head"><span class="node-icon">📤</span><h2>Deliverables</h2><span class="node-meta">files api</span></div>
+        <div class="node-body">
+          <p class="small">
+            <code>drawing.dxf</code> — layered DXF (CUT / BEND / DIM)<br>
+            <code>review.md</code> — entity table + ambiguities<br>
+            <code>preprocessed.png</code> — binarised input image
+          </p>
+          <div class="field"><div class="field-k">DXF layers</div>
+            <span class="tag on">CUT</span> outlines + holes
+            <span class="tag on">BEND</span> fold lines
+            <span class="tag on">DIM</span> dimension text
+          </div>
+        </div>
+      </div>
+
+      <div class="node key grow">
+        <div class="node-head"><span class="node-icon">🎯</span><h2>Outcome</h2><span class="node-meta"><b>user.define_outcome</b> · max_iterations 3</span></div>
+        <div class="node-body">
+          <p class="small sub" style="margin-bottom:8px;">Rubric graded by the platform — <code>rubric.content</code> in the kickoff event.</p>
+          <ol class="rubric small">
+            <li><code>drawing.dxf</code> exists and <code>ezdxf.readfile()</code> succeeds</li>
+            <li>At least one closed LWPOLYLINE on the <code>CUT</code> layer (part outline)</li>
+            <li>All visible holes as CIRCLE entities on the <code>CUT</code> layer</li>
+            <li>BEND layer present with fold lines OR review.md states "no bend lines detected"</li>
+            <li><code>review.md</code> exists with entity table, confidence, and ambiguities list</li>
+          </ol>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- Evals + run log -->
+  <div class="lane-grid">
+    <div class="lane">
+      <div class="lane-head"><span class="node-icon">📜</span><h2>Sessions · run log</h2><span class="lane-meta">no runs yet</span></div>
+      <div class="lane-body">
+        <div class="overflow">
+        <table>
+          <thead><tr><th>Run</th><th>Session</th><th>Verdict</th><th>Note</th></tr></thead>
+          <tbody>
+            <tr><td>—</td><td class="mono">—</td><td><span class="tag">no runs yet</span></td><td class="sub">First launch fills this in.</td></tr>
+          </tbody>
+        </table>
+        </div>
+      </div>
+    </div>
+    <div class="lane">
+      <div class="lane-head"><span class="node-icon">🧪</span><h2>Evals</h2><span class="lane-meta">case-01 ready</span></div>
+      <div class="lane-body">
+        <div class="overflow">
+        <table>
+          <thead><tr><th>Case</th><th>Input</th><th>Known-good</th><th>Last verdict</th></tr></thead>
+          <tbody>
+            <tr>
+              <td class="mono">case-01</td>
+              <td>Synthetic drawing (run generate_test.py)</td>
+              <td>Today's verified output</td>
+              <td><span class="tag">not run yet</span></td>
+            </tr>
+            <tr>
+              <td class="mono">case-02</td>
+              <td>Your first real shop scan</td>
+              <td>Engineer-validated DXF</td>
+              <td><span class="tag">bring after v0 passes</span></td>
+            </tr>
+          </tbody>
+        </table>
+        </div>
+        <p class="small sub" style="margin:.5em 0 0;">Re-run <code>evals/run-evals.sh</code> before promoting any new agent version.</p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Version rail -->
+  <div class="lane full">
+    <div class="lane-head"><span class="node-icon">🧭</span><h2>Next directions</h2><span class="lane-meta">the version rail</span></div>
+    <div class="lane-body">
+      <div class="rail">
+        <div class="ver">
+          <div class="ver-tag">v1</div>
+          <div class="ver-what">Scale calibration</div>
+          <div class="ver-why">v0 extracts shape, not real-world dimensions</div>
+          <div class="ver-how">User provides one known measurement → agent computes px/mm ratio → dimensionally accurate DXF</div>
+        </div>
+        <div class="ver">
+          <div class="ver-tag">v1</div>
+          <div class="ver-what">Batch mode — folder of drawings → ZIP of DXFs</div>
+          <div class="ver-why">v0 proves single-image quality first</div>
+          <div class="ver-how">Multiple file resources on the session; agent loops over /mnt/files/</div>
+        </div>
+        <div class="ver">
+          <div class="ver-tag">v1</div>
+          <div class="ver-what">Gemini + Ollama/LLaVA tested end-to-end</div>
+          <div class="ver-why">LiteLLM routes them; validation not done yet</div>
+          <div class="ver-how"><code>dxfvec convert test.png --provider google|ollama</code> + fix JSON diffs</div>
+        </div>
+        <div class="ver">
+          <div class="ver-tag">v2</div>
+          <div class="ver-what">Per-customer deployment (productize)</div>
+          <div class="ver-why">Needs UI + vault-per-user pattern</div>
+          <div class="ver-how">CMA vault per customer (<code>external_user_id</code>); their frontend creates sessions; see CMA_operate_in_production cookbook</div>
+        </div>
+        <div class="ver">
+          <div class="ver-tag">v2</div>
+          <div class="ver-what">Confidence-gated human review</div>
+          <div class="ver-why">Needs a surface for requires_action confirmations</div>
+          <div class="ver-how">Custom tool <code>request_human_review()</code> → <code>requires_action</code> → engineer answers; CMA_gate_human_in_the_loop cookbook</div>
+        </div>
+        <div class="ver">
+          <div class="ver-tag">always</div>
+          <div class="ver-what">Re-run evals before promoting a new version</div>
+          <div class="ver-why">Process habit, not a build task</div>
+          <div class="ver-how"><code>bash evals/run-evals.sh</code> → check results-v&lt;N&gt;.json → promote only when verdicts hold</div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <footer>generated from build-sheet by claude code · live runs &amp; traces: <a href="https://platform.claude.com/workspaces/default/agents">open the console</a> (your key's workspace — swap "default" if yours differs)</footer>
+</div>
+</body>
+</html>
