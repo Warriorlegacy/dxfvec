@@ -126,6 +126,7 @@ def _extract_json(text: str, provider: str) -> dict:
         f"Response saved to: raw_response.txt\n"
         f"Response (first 500 chars):\n{text[:500]}"
     )
+def _scale_geometry(geometry: dict, factor: float) -> dict:
     """Scale all coordinates in geometry dict by factor (px/mm → mm).
 
     Applies to: outlines points, holes center/radius, bend_lines points,
@@ -230,6 +231,9 @@ def _write_review(
         f"| Bend / fold lines  | {len(bends):>5} | BEND  |",
         f"| Dimension text     | {len(dims):>5} | DIM   |",
     ]
+
+    if not bends:
+        lines.append("\nno bend lines detected")
 
     if ambiguities:
         lines += ["\n## Engineer must verify\n"]

@@ -216,6 +216,41 @@ class ImageModifier:
         return cv2.fastNlMeansDenoisingColored(img, None, strength, strength, 5, 5)
 
     @staticmethod
+    def rotate(img: np.ndarray, angle: float) -> np.ndarray:
+        h, w = img.shape[:2]
+        center = (w // 2, h // 2)
+        M = cv2.getRotationMatrix2D(center, angle, 1.0)
+        return cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_CUBIC, borderMode=cv2.BORDER_REPLICATE)
+
+    @staticmethod
+    def sharpen(img: np.ndarray) -> np.ndarray:
+        kernel = np.array([[0, -1, 0], [-1, 5, -1], [0, -1, 0]], dtype=np.float32)
+        return cv2.filter2D(img, -1, kernel)
+
+    @staticmethod
+    def deskew(img: np.ndarray) -> Tuple[np.ndarray, float]:
+        gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if img.ndim == 3 else img
+        edges = cv2.Canny(gray, 50, 150, apertureSize=3)
+        lines = cv2.HoughLines(edges, 1, np.pi / 180, threshold=50)
+        if lines is None:
+            return img, 0.0
+        angles = []
+        for line in lines[:30]:
+            rho, theta = line[0]
+            ang = (theta - np.pi / 2) * 180.0 / np.pi
+            if abs(ang) < 45:
+                angles.append(ang)
+        if not angles:
+            return img, 0.0
+        median = float(np.median(angles))
+        if abs(median) < 0.5:
+            return img, 0.0
+        h, w = img.shape[:2]
+        M = cv2.getRotationMatrix2D((w // 2, h // 2), median, 1.0)
+        return cv2.warpAffine(img, M, (w, h), flags=cv2.INTER_CUBIC,
+                              borderMode=cv2.BORDER_REPLICATE), median
+
+    @staticmethod
     def binarize(img: np.ndarray, method: str = "adaptive",
                  block_size: int = 11, c: int = 2) -> np.ndarray:
         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY) if len(img.shape) == 3 else img

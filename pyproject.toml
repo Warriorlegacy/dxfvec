@@ -9,7 +9,7 @@ description = "100% free image vectorization and DXF conversion — no API keys 
 readme = "README.md"
 requires-python = ">=3.10"
 license = {text = "Apache-2.0"}
-keywords = ["dxf", "cad", "vectorization", "engineering", "metal-fabrication", "opencv", "free"]
+keywords = ["dxf", "cad", "vectorization", "engineering", "metal-fabrication", "opencv", "free", "vtracer", "byok"]
 dependencies = [
     "opencv-python>=4.9",
     "Pillow>=10",
@@ -17,11 +17,14 @@ dependencies = [
     "ezdxf>=1.3",
     "scikit-image>=0.22",
     "click>=8.1",
+    "vtracer>=0.6",
+    "requests>=2.31",
 ]
 
 [project.optional-dependencies]
-web = ["flask>=3.0"]
+web = ["flask>=3.0", "flask-cors>=4.0", "gunicorn>=21.2"]
 crew = ["crewai>=0.55", "litellm>=1.40"]
+cloud = ["requests>=2.31"]
 
 [project.scripts]
 dxfvec = "dxfvec.cli:main"
