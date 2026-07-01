@@ -93,7 +93,10 @@ HTML_TEMPLATE = """
 </head>
 <body>
     <div class="container">
-        <h1>dxfvec <span class="badge">100% FREE</span></h1>
+        <nav style="display:flex; gap:1rem; align-items:center; margin-bottom:1rem;">
+            <h1 style="margin:0;">dxfvec <span class="badge">100% FREE</span></h1>
+            <a href="/files" style="color:#8b949e; text-decoration:none; font-size:0.9rem; margin-left:auto;">📂 Gallery</a>
+        </nav>
         <p class="subtitle">Image Vectorization & DXF Conversion — No API Keys Required</p>
         
         <div class="features">
@@ -223,7 +226,10 @@ HTML_TEMPLATE = """
                             <div class="stat-label">Polygons</div>
                         </div>
                     </div>
-                    <a href="/download/${data.filename}" class="download-btn">Download DXF</a>
+                    <div style="display:flex; gap:0.75rem; margin-top:1rem;">
+                        <a href="/view/${data.filename}" class="download-btn" style="background:#1f6feb;">🔍 View DXF</a>
+                        <a href="/download/${data.filename}" class="download-btn">⬇ Download DXF</a>
+                    </div>
                 `;
                 resultDiv.classList.remove('hidden');
             } catch (err) {
