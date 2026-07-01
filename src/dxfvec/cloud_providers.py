@@ -142,6 +142,75 @@ class CloudProviderBase:
             "provider": self.provider_name,
         }
 
+    def _save_dxf_directly(
+        self,
+        dxf_content: bytes,
+        output_dir: Path,
+        dxf_mode: str,
+        engine_name: str,
+        scale_factor: float | None = None,
+    ) -> dict[str, Any]:
+        """Save DXF directly, parse its entities to estimate geometry count, and write review."""
+        dxf_path = output_dir / "drawing.dxf"
+        dxf_path.write_bytes(dxf_content)
+        review_path = output_dir / "review.md"
+
+        outlines_count = 0
+        holes_count = 0
+        polygons_count = 0
+        lines_count = 0
+        geometry = {"outlines": [], "holes": [], "bend_lines": [], "dimensions": []}
+
+        try:
+            import ezdxf
+            doc = ezdxf.readfile(str(dxf_path))
+            msp = doc.modelspace()
+            for ent in msp:
+                t = ent.dxftype()
+                if t == "LWPOLYLINE":
+                    outlines_count += 1
+                elif t == "CIRCLE":
+                    holes_count += 1
+                elif t == "LINE":
+                    lines_count += 1
+                elif t in ("POLYLINE", "SOLID"):
+                    polygons_count += 1
+        except Exception:
+            pass
+
+        # Write review
+        lines = [
+            f"# DXF Vectorization Review — {Path(output_dir).name}",
+            f"\n**Engine:** {engine_name}  |  **Provider:** {self.display_name}",
+            "\n## Geometry extracted\n",
+            "| Entity  | Count | Layer |",
+            "|---------|-------|-------|",
+            f"| Outlines| {outlines_count:>5} | CUT   |",
+            f"| Holes   | {holes_count:>5} | CUT   |",
+            f"| Lines   | {lines_count:>5} | LINE  |",
+            f"| Polygons| {polygons_count:>5} | ENGRAVE |",
+            "\n## Provider info\n",
+            f"- **{self.display_name}**: cloud API (BYOK)",
+            f"- API key configured: {'yes' if self.is_available() else 'no'}",
+            "- DXF layers: CUT / ENGRAVE",
+        ]
+        review_path.write_text("\n".join(lines), encoding="utf-8")
+
+        return {
+            "dxf": str(dxf_path),
+            "review": str(review_path),
+            "geometry": geometry,
+            "engine": engine_name,
+            "dxf_mode": dxf_mode,
+            "provider": self.provider_name,
+            "stats": {
+                "outlines": outlines_count,
+                "holes": holes_count,
+                "lines": lines_count,
+                "polygons": polygons_count,
+            }
+        }
+
 
 # ── Vectorizer.AI provider ───────────────────────────────────────────────────
 
@@ -206,12 +275,8 @@ class VectorizerAIProvider(CloudProviderBase):
         except requests.RequestException as e:
             raise RuntimeError(f"Vectorizer.AI API error: {e}")
 
-        # Save DXF directly — Vectorizer.AI returns the DXF file
-        dxf_path = output_dir / "drawing.dxf"
-        dxf_path.write_bytes(response.content)
-
-        # Also keep a reference to provider for metadata
-        return self._save_and_dxf(
+        # Save and return using the DXF-direct helper
+        return self._save_dxf_directly(
             response.content, output_dir, dxf_mode,
             engine_name="cloud:vectorizer_ai", scale_factor=scale_factor,
         )
@@ -286,7 +351,7 @@ class DXFaiProvider(CloudProviderBase):
         except requests.RequestException as e:
             raise RuntimeError(f"DXFai API error: {e}")
 
-        return self._save_and_dxf(
+        return self._save_dxf_directly(
             response.content, output_dir, dxf_mode,
             engine_name="cloud:dxfai", scale_factor=scale_factor,
         )
