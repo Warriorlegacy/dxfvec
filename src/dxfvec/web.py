@@ -784,8 +784,8 @@ VIEWER_TEMPLATE = r'''
     <h1>📐 {{ filename }}</h1>
     <div class="toolbar">
         <button class="btn" onclick="fitAll()">⊡ Fit All</button>
-        <button class="btn btn-outline" onclick="zoom(1.3)">＋</button>
-        <button class="btn btn-outline" onclick="zoom(0.7)">－</button>
+        <button class="btn btn-outline" onclick="_zoom(1.3)">＋</button>
+        <button class="btn btn-outline" onclick="_zoom(0.7)">－</button>
         <button class="btn btn-outline" onclick="printDXF()" style="background:#1f6feb;border-color:#1f6feb;">🖨 Print</button>
         <button class="btn btn-outline" onclick="downloadPDF()" style="background:#9e6a03;border-color:#9e6a03;">📄 PDF</button>
         <a class="btn" href="/download/{{ filename }}" style="color:white;">⬇ Download</a>
@@ -811,7 +811,7 @@ const BG = "#1a1d23";
 const GRID = "#252830";
 
 let V = { entities: [], layers: [], bbox: null };
-let pan = {x: 0, y: 0}, zoom = 1, dragging = null;
+let pan = {x: 0, y: 0}, viewZoom = 1, dragging = null;
 
 function hexToRgba(hex, a) {
     const n = parseInt(hex.slice(1), 16);
@@ -851,12 +851,12 @@ function fitAll() {
     const wrap = document.getElementById('canvas-wrap');
     canvas.width = wrap.clientWidth;
     canvas.height = wrap.clientHeight;
-    if (!V.bbox) { zoom = 1; pan.x = canvas.width/2; pan.y = canvas.height/2; return; }
+    if (!V.bbox) { viewZoom = 1; pan.x = canvas.width/2; pan.y = canvas.height/2; return; }
     const {minx, miny, maxx, maxy} = V.bbox;
     const bw = maxx - minx || 1, bh = maxy - miny || 1;
-    zoom = Math.min(canvas.width / (bw * 1.1), canvas.height / (bh * 1.1));
-    pan.x = canvas.width / 2 - (minx + bw / 2) * zoom;
-    pan.y = canvas.height / 2 + (miny + bh / 2) * zoom;
+    viewZoom = Math.min(canvas.width / (bw * 1.1), canvas.height / (bh * 1.1));
+    pan.x = canvas.width / 2 - (minx + bw / 2) * viewZoom;
+    pan.y = canvas.height / 2 + (miny + bh / 2) * viewZoom;
     draw();
 }
 
@@ -923,14 +923,14 @@ function draw() {
         } else if (ent.type === 'circle') {
             ctx.lineWidth = 1.2;
             ctx.beginPath();
-            ctx.arc(wx(ent.cx), wy(ent.cy), ent.r * zoom, 0, Math.PI * 2);
+            ctx.arc(wx(ent.cx), wy(ent.cy), ent.r * viewZoom, 0, Math.PI * 2);
             ctx.stroke();
         } else if (ent.type === 'ellipse') {
             ctx.lineWidth = 1.2;
             ctx.save();
             ctx.translate(wx(ent.cx), wy(ent.cy));
             ctx.rotate((ent.angle || 0) * Math.PI / 180);
-            ctx.scale(ent.a * zoom, ent.b * zoom);
+            ctx.scale(ent.a * viewZoom, ent.b * viewZoom);
             ctx.beginPath(); ctx.arc(0, 0, 1, 0, Math.PI * 2); ctx.stroke();
             ctx.restore();
         } else if (ent.type === 'polyline') {
@@ -947,27 +947,27 @@ function draw() {
             ctx.fillRect(wx(ent.x) - 2, wy(ent.y) - 2, 4, 4);
         } else if (ent.type === 'text') {
             ctx.fillStyle = color;
-            ctx.font = `${Math.max(ent.height * zoom * 0.8, 8)}px monospace`;
+            ctx.font = `${Math.max(ent.height * viewZoom * 0.8, 8)}px monospace`;
             ctx.fillText(ent.text, wx(ent.x), wy(ent.y));
         }
     }
 
     const n = V.entities.length;
     const info = document.getElementById('info');
-    info.textContent = `Entities: ${n}` + (V.bbox ? ` | Zoom: ${(zoom*100).toFixed(0)}%` : '');
+    info.textContent = `Entities: ${n}` + (V.bbox ? ` | Zoom: ${(viewZoom*100).toFixed(0)}%` : '');
 }
 
-function wx(x) { return x * zoom + pan.x; }
-function wy(y) { return -y * zoom + pan.y; }   // flip Y so CAD-up is up
-function invX(sx) { return (sx - pan.x) / zoom; }
-function invY(sy) { return -(sy - pan.y) / zoom; }
+function wx(x) { return x * viewZoom + pan.x; }
+function wy(y) { return -y * viewZoom + pan.y; }   // flip Y so CAD-up is up
+function invX(sx) { return (sx - pan.x) / viewZoom; }
+function invY(sy) { return -(sy - pan.y) / viewZoom; }
 
-function zoom(factor) {
+function _zoom(factor) {
     const cx = canvas.width / 2, cy = canvas.height / 2;
     const wx0 = invX(cx), wy0 = invY(cy);
-    zoom *= factor;
-    pan.x = cx - wx0 * zoom;
-    pan.y = cy + wy0 * zoom;
+    viewZoom *= factor;
+    pan.x = cx - wx0 * viewZoom;
+    pan.y = cy + wy0 * viewZoom;
     draw();
 }
 
@@ -988,9 +988,9 @@ canvas.addEventListener('wheel', e => {
     const rect = canvas.getBoundingClientRect();
     const mx = e.clientX - rect.left, my = e.clientY - rect.top;
     const wx0 = invX(mx), wy0 = invY(my);
-    zoom *= e.deltaY < 0 ? 1.1 : 0.9;
-    zoom = Math.max(0.01, Math.min(zoom, 50));
-    pan.x = mx - wx0 * zoom; pan.y = my + wy0 * zoom;
+    viewZoom *= e.deltaY < 0 ? 1.1 : 0.9;
+    viewZoom = Math.max(0.01, Math.min(viewZoom, 50));
+    pan.x = mx - wx0 * viewZoom; pan.y = my + wy0 * viewZoom;
     draw();
 }, {passive: false});
 
@@ -1018,7 +1018,7 @@ function downloadPDF() {
         if (ent.type === 'line') {
             pctx.beginPath(); pctx.moveTo(wx(ent.x1), wy(ent.y1)); pctx.lineTo(wx(ent.x2), wy(ent.y2)); pctx.stroke();
         } else if (ent.type === 'circle') {
-            pctx.beginPath(); pctx.arc(wx(ent.cx), wy(ent.cy), ent.r * zoom, 0, Math.PI * 2); pctx.stroke();
+            pctx.beginPath(); pctx.arc(wx(ent.cx), wy(ent.cy), ent.r * viewZoom, 0, Math.PI * 2); pctx.stroke();
         } else if (ent.type === 'polyline') {
             pctx.beginPath();
             ent.points.forEach((p, i) => { const s = {x: wx(p.x), y: wy(p.y)}; i === 0 ? pctx.moveTo(s.x, s.y) : pctx.lineTo(s.x, s.y); });
