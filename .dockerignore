@@ -12,5 +12,12 @@ venv
 output/
 evals/
 test-runs/
+tests/
+output_cli/
+output_cli_adv/
+output_cli_adv_warped/
+output_cli_classic_warped/
+output_cli_deskew/
+images/
 *.md
 !README.md

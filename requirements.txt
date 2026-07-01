@@ -1,4 +1,4 @@
-opencv-python>=4.9
+opencv-python-headless>=4.9
 Pillow>=10
 numpy>=1.26
 ezdxf>=1.3

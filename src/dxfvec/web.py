@@ -384,7 +384,8 @@ def index():
 @app.route("/health")
 def health():
     """Health check endpoint for deployment platforms."""
-    return jsonify({"status": "ok", "service": "dxfvec", "version": "1.0.0"})
+    from . import __version__
+    return jsonify({"status": "ok", "service": "dxfvec", "version": __version__})
 
 @app.route("/api/engines")
 def list_engines_api():

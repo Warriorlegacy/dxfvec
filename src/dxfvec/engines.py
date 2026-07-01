@@ -1,12 +1,19 @@
 """Engine abstraction for dxfvec — Classic, Advanced (VTracer), and Cloud AI (BYOK).
 
 Each engine implements a common interface:
-    convert(image_path, output_dir, config) -> dict with dxf, review, geometry
+    convert(image_path, output_dir, config) -> dict with dxf, qa_report, geometry
 
-Engines:
-  - ClassicEngine: local OpenCV contour tracing (no API keys)
-  - AdvancedEngine: local VTracer AI-style vectorization (no API keys)
-  - CloudAIEngine: external APIs like Vectorizer.AI, DXFai (BYOK keys required)
+Engines now produce the canonical PathModel (PRD §7.3) and include
+QA reports (PRD §3.4 P0) with every export.
+
+Changes vs v1:
+  - All engines produce PathModel → write_dxf for DXF generation
+  - QA report generated automatically after every conversion
+  - Arc/circle detection post-processing (PRD §3.3 P0)
+  - Tolerance-based node reduction (explicit ε in mm, not abstract slider)
+  - DXF version selection (PRD §3.4 P0)
+  - Calibration-aware units declaration in DXF header (PRD §3.4 P0)
+  - Centerline tracing mode (PRD §3.2 P0)
 """
 from __future__ import annotations
 
@@ -15,15 +22,27 @@ from pathlib import Path
 from typing import Any
 
 import cv2
+import numpy as np
 
-from .dxf_writer import create_dxf
+from .dxf_writer import write_dxf, write_svg
 from .vectorizer import (
     Vectorizer,
     ImageModifier,
     ShapeDetector,
-    DXFGenerator,
 )
 from .preprocess import preprocess
+from .path_model import (
+    Calibration,
+    DXFMode,
+    DXFVersion,
+    PathModel,
+    TraceMode,
+    Vec2,
+    polyline_to_path,
+    circle_to_path,
+)
+from .qa_report import generate_qa_report, save_qa_report
+from .curve_fitting import detect_and_replace_arcs, douglas_peucker
 
 
 # ── Presets ──────────────────────────────────────────────────────────────────
@@ -34,6 +53,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         "min_area": 50,
         "simplify_tolerance": 1.0,
         "smoothing": 1.0,
+        "tolerance_mm": 0.08,
         "corner_threshold": 70,
         "noise_filter": 2,
         "description": "High-detail for logos and artwork engraving",
@@ -43,6 +63,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         "min_area": 200,
         "simplify_tolerance": 2.5,
         "smoothing": 2.0,
+        "tolerance_mm": 0.25,
         "corner_threshold": 40,
         "noise_filter": 5,
         "description": "Simplified paths for fast laser cutting",
@@ -52,6 +73,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         "min_area": 100,
         "simplify_tolerance": 1.5,
         "smoothing": 1.0,
+        "tolerance_mm": 0.10,
         "corner_threshold": 60,
         "noise_filter": 3,
         "description": "Preserves dimensions, lines, and precision",
@@ -61,6 +83,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         "min_area": 30,
         "simplify_tolerance": 0.8,
         "smoothing": 0.5,
+        "tolerance_mm": 0.05,
         "corner_threshold": 80,
         "noise_filter": 1,
         "description": "Fine detail for topographic maps and contours",
@@ -69,11 +92,6 @@ PRESETS: dict[str, dict[str, Any]] = {
 
 
 def apply_preset(config: dict[str, Any], preset_name: str) -> dict[str, Any]:
-    """Merge preset values into config, returning a new dict.
-    
-    Preset values override base config — this is intentional so that
-    selecting a preset actually changes the vectorization parameters.
-    """
     if preset_name not in PRESETS:
         return config
     preset = PRESETS[preset_name]
@@ -92,8 +110,6 @@ def list_presets() -> dict[str, dict[str, Any]]:
 # ── Base engine interface ─────────────────────────────────────────────────────
 
 class BaseEngine(ABC):
-    """Abstract base class for all vectorization engines."""
-
     @abstractmethod
     def convert(
         self,
@@ -101,16 +117,6 @@ class BaseEngine(ABC):
         output_dir: str | Path,
         config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
-        """Convert an image to DXF.
-
-        Args:
-            image_path: Path to input raster image.
-            output_dir: Directory for output files.
-            config: Engine-specific configuration overrides.
-
-        Returns:
-            dict with keys: dxf, review, geometry, stats, engine
-        """
         ...
 
 
@@ -119,11 +125,8 @@ class BaseEngine(ABC):
 class ClassicEngine(BaseEngine):
     """Deterministic pipeline using image processing and contour tracing.
 
-    Always available, no API keys required. Uses OpenCV for:
-    - Adaptive image preprocessing
-    - Multi-scale Canny edge fusion (photo mode)
-    - Contour extraction, polygon/circle/line detection
-    - DXF output with CNC/laser layer semantics
+    Always available, no API keys required. Now produces canonical PathModel
+    with QA report, arc detection, and tolerance-based node reduction.
     """
 
     name = "classic"
@@ -135,65 +138,84 @@ class ClassicEngine(BaseEngine):
         config: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         cfg = config or {}
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        # Extract config with defaults
         scale_factor = cfg.get("scale_factor")
         min_area = cfg.get("min_area", 100)
         simplify_tolerance = cfg.get("simplify_tolerance", 1.5)
-        dxf_mode = cfg.get("dxf_mode", "lines")  # lines, hatch, faces
-        retr_mode_str = cfg.get("retr_mode", "auto")  # auto, external, list
+        dxf_mode_str = cfg.get("dxf_mode", "lines")
+        dxf_version_str = cfg.get("dxf_version", "R2010")
+        trace_mode_str = cfg.get("trace_mode", "outline")
+        tolerance_mm = cfg.get("tolerance_mm", 0.15)
+        detect_arcs = cfg.get("detect_arcs", True)
+        retr_mode_str = cfg.get("retr_mode", "auto")
 
-        # Map retr_mode string to cv2 constant
+        # Calibration
+        calibration = None
+        if "calibration" in cfg:
+            cal = cfg["calibration"]
+            if isinstance(cal, dict):
+                calibration = Calibration(
+                    reference_px_length=cal.get("reference_px_length", 0),
+                    real_world_length=cal.get("real_world_length", 0),
+                    unit=cal.get("unit", "mm"),
+                )
+            elif isinstance(cal, Calibration):
+                calibration = cal
+
         retr_modes = {
-            "auto": None,  # handled by Vectorizer
+            "auto": None,
             "external": cv2.RETR_EXTERNAL,
             "list": cv2.RETR_LIST,
             "tree": cv2.RETR_TREE,
             "ccomp": cv2.RETR_CCOMP,
         }
 
+        # Use the upgraded Vectorizer
         vec = Vectorizer(
             min_area=min_area,
             simplify_tolerance=simplify_tolerance,
             retr_mode=retr_modes.get(retr_mode_str, cv2.RETR_LIST),
         )
 
-        result = vec.vectorize(image_path, output_dir, scale_factor=scale_factor)
+        result = vec.vectorize(
+            image_path=image_path,
+            output_dir=output_dir,
+            scale_factor=scale_factor,
+            calibration=calibration,
+            tolerance_mm=tolerance_mm,
+            detect_arcs=detect_arcs,
+            trace_mode=trace_mode_str,
+            dxf_mode=dxf_mode_str,
+            dxf_version=dxf_version_str,
+        )
 
-        # Convert to CNC layer semantics if requested
+        # Apply CNC layer rewrite if needed
         if cfg.get("cnc_layers", True):
-            dxf_path = Path(result["dxf"])
-            _apply_cnc_layers(dxf_path, dxf_mode)
+            _apply_cnc_layers(Path(result["dxf"]), dxf_mode_str)
 
         result["engine"] = self.name
-        result["dxf_mode"] = dxf_mode
+        result["dxf_mode"] = dxf_mode_str
         return result
 
 
 def _apply_cnc_layers(dxf_path: Path, mode: str = "lines") -> None:
-    """Rewrite DXF layers to CUT/ENGRAVE semantics for CNC/laser workflows.
-
-    Args:
-        dxf_path: Path to the DXF file to modify in-place.
-        mode: 'lines' for cut-only, 'hatch' for engrave fills, 'faces' for closed shapes.
-    """
+    """Rewrite DXF layers to CUT/ENGRAVE semantics for CNC/laser workflows."""
     try:
         import ezdxf
-        import numpy as np
-
         doc = ezdxf.readfile(str(dxf_path))
         msp = doc.modelspace()
 
-        # Determine which original layers map to CUT vs ENGRAVE
         cut_layers = {"OUTLINE", "HOLE", "LINE", "POLYGON", "ELLIPSE", "CUT"}
         engrave_layers = set()
 
         if mode == "hatch":
-            # All filled regions go to ENGRAVE
             engrave_layers = {"POLYGON", "HATCH", "FILL"}
         elif mode == "faces":
-            # Closed shapes become ENGRAVE, open paths stay CUT
             engrave_layers = {"POLYGON", "ELLIPSE"}
 
-        # Rename layers
         layer_map: dict[str, str] = {}
         for layer_name in doc.layers:
             if layer_name in cut_layers:
@@ -207,18 +229,11 @@ def _apply_cnc_layers(dxf_path: Path, mode: str = "lines") -> None:
             else:
                 layer_map[layer_name] = layer_name
 
-        # Create target layers with correct colors
-        layer_colors = {
-            "CUT": 1,
-            "ENGRAVE": 5,
-            "BEND": 5,
-            "DIM": 3,
-        }
+        layer_colors = {"CUT": 1, "ENGRAVE": 5, "BEND": 5, "DIM": 3}
         for target_name, color in layer_colors.items():
             if target_name not in doc.layers:
                 doc.layers.add(target_name, color=color)
 
-        # Update entity layers
         for ent in msp:
             old_layer = ent.dxf.get("layer", "0")
             new_layer = layer_map.get(old_layer, old_layer)
@@ -226,7 +241,7 @@ def _apply_cnc_layers(dxf_path: Path, mode: str = "lines") -> None:
 
         doc.saveas(str(dxf_path))
     except Exception:
-        pass  # If ezdxf rewrite fails, leave DXF as-is
+        pass
 
 
 # ── Advanced engine (local VTracer AI) ───────────────────────────────────────
@@ -234,8 +249,8 @@ def _apply_cnc_layers(dxf_path: Path, mode: str = "lines") -> None:
 class AdvancedEngine(BaseEngine):
     """Local AI-style engine using VTracer open-source vectorizer.
 
-    No external API keys required. Produces high-quality SVG paths
-    which are then converted to DXF with CNC layer semantics.
+    VTracer SVG output is parsed into the canonical PathModel, then
+    exported through the same write_dxf pipeline with QA reports.
     """
 
     name = "advanced"
@@ -265,7 +280,6 @@ class AdvancedEngine(BaseEngine):
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
-        # Merge defaults with user config
         vcfg = self._default_config()
         vcfg.update({k: v for k, v in cfg.items() if k in self._default_config()})
 
@@ -278,14 +292,30 @@ class AdvancedEngine(BaseEngine):
             )
 
         image_path = Path(image_path)
-
-        # VTracer outputs SVG — convert to our internal format then DXF
         svg_path = output_dir / "vtracer_output.svg"
         dxf_path = output_dir / "drawing.dxf"
-        review_path = output_dir / "review.md"
-        orig_px = output_dir / "original_size.json"
 
-        # Run VTracer with appropriate settings
+        # Calibration
+        calibration = None
+        if "calibration" in cfg:
+            cal = cfg["calibration"]
+            if isinstance(cal, dict):
+                calibration = Calibration(
+                    reference_px_length=cal.get("reference_px_length", 0),
+                    real_world_length=cal.get("real_world_length", 0),
+                    unit=cal.get("unit", "mm"),
+                )
+            elif isinstance(cal, Calibration):
+                calibration = cal
+
+        scale_factor = cfg.get("scale_factor")
+        dxf_mode_str = cfg.get("dxf_mode", "lines")
+        dxf_version_str = cfg.get("dxf_version", "R2010")
+        trace_mode_str = cfg.get("trace_mode", "outline")
+        tolerance_mm = cfg.get("tolerance_mm", 0.15)
+        detect_arcs = cfg.get("detect_arcs", True)
+
+        # Apply preset to vtracer config
         preset_name = cfg.get("preset", "")
         if preset_name == "logo_engrave":
             vcfg.update({"filter_speckle": 2, "corner_threshold": 80,
@@ -297,278 +327,260 @@ class AdvancedEngine(BaseEngine):
             vcfg.update({"filter_speckle": 1, "corner_threshold": 90,
                          "length_threshold": 2.0, "colormode": "color"})
 
-        # Extract and cast config values to their correct type to pass positionally,
-        # preventing PyO3 / native library crashes caused by keyword arguments or float types.
+        # Extract and cast VTracer params (prevents PyO3 crashes)
         colormode = str(vcfg.get("colormode", "binary"))
         hierarchical = str(vcfg.get("hierarchical", "stacked"))
         mode = str(vcfg.get("mode", "spline"))
-        
         try:
             filter_speckle = int(float(vcfg.get("filter_speckle", 4)))
         except (ValueError, TypeError):
             filter_speckle = 4
-            
         try:
             color_precision = int(float(vcfg.get("color_precision", 6)))
         except (ValueError, TypeError):
             color_precision = 6
-            
         try:
             layer_difference = int(float(vcfg.get("layer_difference", 16)))
         except (ValueError, TypeError):
             layer_difference = 16
-            
         try:
             corner_threshold = int(float(vcfg.get("corner_threshold", 60)))
         except (ValueError, TypeError):
             corner_threshold = 60
-            
         try:
             length_threshold = float(vcfg.get("length_threshold", 4.0))
         except (ValueError, TypeError):
             length_threshold = 4.0
-            
         try:
             max_iterations = int(float(vcfg.get("max_iterations", vcfg.get("segment_length", 10))))
         except (ValueError, TypeError):
             max_iterations = 10
-            
         try:
             splice_threshold = int(float(vcfg.get("splice_threshold", 45)))
         except (ValueError, TypeError):
             splice_threshold = 45
-            
         try:
             path_precision = int(float(vcfg.get("path_precision", 8)))
         except (ValueError, TypeError):
             path_precision = 8
 
         vtracer.convert_image_to_svg_py(
-            str(image_path),
-            str(svg_path),
-            colormode,
-            hierarchical,
-            mode,
-            filter_speckle,
-            color_precision,
-            layer_difference,
-            corner_threshold,
-            length_threshold,
-            max_iterations,
-            splice_threshold,
-            path_precision
+            str(image_path), str(svg_path),
+            colormode, hierarchical, mode,
+            filter_speckle, color_precision, layer_difference,
+            corner_threshold, length_threshold, max_iterations,
+            splice_threshold, path_precision,
         )
 
-        # Parse SVG paths and convert to DXF geometry
-        geometry = _svg_to_geometry(svg_path, cfg.get("scale_factor"))
-        dxf_mode = cfg.get("dxf_mode", "lines")
-
-        create_dxf(geometry, dxf_path)
-
-        # Write review
-        _write_advanced_review(
-            geometry, image_path.name, review_path,
-            preset_name or "custom", dxf_mode
+        # Parse SVG → PathModel (node reduction is done inside)
+        model = self._svg_to_pathmodel(
+            svg_path, scale_factor, calibration,
+            dxf_mode_str, dxf_version_str, trace_mode_str,
+            tolerance_mm=tolerance_mm,
         )
+
+        # Arc/circle detection
+        if detect_arcs:
+            detect_and_replace_arcs(model, max_deviation=tolerance_mm)
+
+        # Scale if calibration provided
+        if calibration and calibration.is_valid:
+            model.scale(calibration.scale_factor)
+        elif scale_factor is not None and scale_factor != 1.0:
+            model.scale(scale_factor)
+
+        # Write DXF through canonical writer
+        write_dxf(
+            model=model,
+            output_path=dxf_path,
+            dxf_version=model.dxf_version,
+            units=calibration.unit if calibration else "mm",
+            enforce_closed_cut=True,
+            max_gap_close=3.0,
+        )
+
+        # Write SVG
+        write_svg(model, output_dir / "output.svg")
+
+        # Generate QA report
+        qa_report = generate_qa_report(model, dxf_path=dxf_path)
+
+        # Save QA artifacts
+        qa_json_path = output_dir / "qa_report.json"
+        qa_json_path.write_text(qa_report.to_json(), encoding="utf-8")
+        qa_md_path = output_dir / "qa_report.md"
+        qa_md_path.write_text(qa_report.to_markdown(), encoding="utf-8")
+
+        # Apply CNC layers
+        if cfg.get("cnc_layers", True):
+            _apply_cnc_layers(dxf_path, dxf_mode_str)
+
+        # Write review (backward compat)
+        self._write_review(model, qa_report, image_path.name,
+                          output_dir / "review.md", preset_name or "custom", dxf_mode_str)
 
         return {
             "dxf": str(dxf_path),
-            "review": str(review_path),
-            "geometry": geometry,
+            "qa_report": qa_report.to_dict(),
+            "geometry": self._model_to_geometry(model),
             "engine": self.name,
-            "dxf_mode": dxf_mode,
-            "stats": _count_geometry(geometry),
+            "dxf_mode": dxf_mode_str,
+            "stats": {
+                "paths": model.entity_count(),
+                "closed": model.closed_path_count(),
+                "open": model.open_path_count(),
+                "segments": qa_report.total_segments,
+                "nodes": qa_report.node_count,
+                "layers": len(qa_report.layers),
+            },
         }
 
-
-def _svg_to_geometry(svg_path: Path, scale_factor: float | None = None) -> dict[str, Any]:
-    """Parse VTracer SVG output into our geometry dict format.
-
-    Extracts path data from SVG and converts to DXF-compatible geometry.
-    """
-    try:
+    def _svg_to_pathmodel(
+        self,
+        svg_path: Path,
+        scale_factor: float | None,
+        calibration: Calibration | None,
+        dxf_mode_str: str,
+        dxf_version_str: str,
+        trace_mode_str: str,
+        tolerance_mm: float = 0.15,
+    ) -> PathModel:
         import xml.etree.ElementTree as ET
         import re
 
+        model = PathModel(
+            trace_mode=TraceMode(trace_mode_str) if trace_mode_str in ("outline", "centerline") else TraceMode.OUTLINE,
+            dxf_mode=DXFMode(dxf_mode_str) if dxf_mode_str in ("lines", "hatch", "faces") else DXFMode.LINES,
+            dxf_version=DXFVersion(dxf_version_str) if dxf_version_str in ("R12", "R2010", "R2018") else DXFVersion.R2010,
+            source_image="",
+        )
+        if calibration and calibration.is_valid:
+            model.calibration = calibration
+
         svg_content = svg_path.read_text(encoding="utf-8")
         root = ET.fromstring(svg_content)
-
-        # Handle SVG namespace
         ns = {"svg": "http://www.w3.org/2000/svg"}
-        # Also try without namespace
-        root_tag = root.tag.split("}")[-1] if "}" in root.tag else root.tag
 
-        if root_tag != "svg":
-            # Wrapper element
-            svg_elem = root.find(".//svg:svg", ns) or root.find(".//svg")
-            if svg_elem is None:
-                svg_elem = root
-        else:
-            svg_elem = root
-
-        outlines = []
-        holes = []
-
-        # Find all path elements
-        paths = svg_elem.findall(".//{http://www.w3.org/2000/svg}path")
+        paths = root.findall(".//{http://www.w3.org/2000/svg}path")
         if not paths:
-            paths = svg_elem.findall(".//path")
+            paths = root.findall(".//path")
 
-        for i, path in enumerate(paths):
-            d = path.get("d", "")
+        for path_elem in paths:
+            d = path_elem.get("d", "")
             if not d:
                 continue
-
-            # Parse SVG path data into points
-            points = _parse_svg_path(d)
+            points = self._parse_svg_path(d)
             if len(points) < 3:
                 continue
 
-            # Determine if closed
             closed = d.strip().endswith("Z") or d.strip().endswith("z")
+            area = self._estimate_polygon_area(points)
 
-            # Estimate area to classify as outline vs hole
-            area = _estimate_polygon_area(points)
             if closed and area < 0:
-                # Negative winding or small area → hole
-                holes.append({"points": points, "closed": closed,
-                              "cx": sum(p[0] for p in points) / len(points),
-                              "cy": sum(p[1] for p in points) / len(points),
-                              "r": _estimate_radius(points)})
+                cx = sum(p[0] for p in points) / len(points)
+                cy = sum(p[1] for p in points) / len(points)
+                r = self._estimate_radius(points)
+                model.add_path(circle_to_path(cx, cy, r, layer="CUT"))
             else:
-                outlines.append({"points": points, "closed": closed,
-                                 "area": abs(area), "perimeter": _estimate_perimeter(points)})
+                simplified = douglas_peucker(
+                    [Vec2(p[0], p[1]) for p in points],
+                    epsilon=tolerance_mm,
+                    closed=closed,
+                )
+                model.add_path(polyline_to_path(
+                    [(p.x, p.y) for p in simplified],
+                    closed=closed, layer="CUT",
+                ))
 
-        # Apply scale if provided
-        if scale_factor is not None:
-            outlines = _scale_geometry_items(outlines, scale_factor)
-            holes = _scale_geometry_items(holes, scale_factor)
+        return model
 
-        return {
-            "outlines": outlines,
-            "holes": holes,
-            "bend_lines": [],
-            "dimensions": [],
-        }
+    def _apply_node_reduction(self, model: PathModel, tolerance_mm: float) -> None:
+        for idx, path in enumerate(model.paths):
+            pts = path.points()
+            if len(pts) < 3:
+                continue
+            simplified = douglas_peucker(pts, epsilon=tolerance_mm, closed=path.closed)
+            model.paths[idx] = polyline_to_path(
+                [(p.x, p.y) for p in simplified],
+                closed=path.closed, layer=path.layer,
+            )
 
-    except Exception as e:
-        return {
-            "outlines": [],
-            "holes": [],
-            "bend_lines": [],
-            "dimensions": [],
-            "error": f"SVG parse error: {e}",
-        }
-
-
-def _parse_svg_path(d: str) -> list[list[float]]:
-    """Parse SVG path data string into a list of [x, y] points."""
-    import re
-
-    points = []
-    # Extract all coordinate pairs (x, y)
-    # Match sequences of numbers separated by spaces/commas
-    numbers = re.findall(r"[-+]?\d*\.?\d+", d)
-    if len(numbers) < 2:
+    @staticmethod
+    def _parse_svg_path(d: str) -> list[list[float]]:
+        import re
+        points = []
+        numbers = re.findall(r"[-+]?\d*\.?\d+", d)
+        if len(numbers) < 2:
+            return points
+        i = 0
+        while i < len(numbers) - 1:
+            try:
+                x = float(numbers[i])
+                y = float(numbers[i + 1])
+                points.append([x, y])
+                i += 2
+            except ValueError:
+                i += 1
         return points
 
-    # Process in pairs
-    i = 0
-    while i < len(numbers) - 1:
-        try:
-            x = float(numbers[i])
-            y = float(numbers[i + 1])
-            points.append([x, y])
-            i += 2
-        except ValueError:
-            i += 1
+    @staticmethod
+    def _estimate_polygon_area(points: list[list[float]]) -> float:
+        if len(points) < 3:
+            return 0.0
+        area = 0.0
+        n = len(points)
+        for i in range(n):
+            j = (i + 1) % n
+            area += points[i][0] * points[j][1]
+            area -= points[j][0] * points[i][1]
+        return area / 2.0
 
-    return points
+    @staticmethod
+    def _estimate_radius(points: list[list[float]]) -> float:
+        if len(points) < 3:
+            return 0.0
+        cx = sum(p[0] for p in points) / len(points)
+        cy = sum(p[1] for p in points) / len(points)
+        max_r = 0.0
+        for p in points:
+            dx = p[0] - cx
+            dy = p[1] - cy
+            max_r = max(max_r, (dx * dx + dy * dy) ** 0.5)
+        return max_r
 
+    @staticmethod
+    def _model_to_geometry(model: PathModel) -> dict:
+        outlines = []
+        holes = []
+        for path in model.paths:
+            pts = [(p.x, p.y) for p in path.points()]
+            if path.layer == "CUT":
+                outlines.append({"points": pts, "closed": path.closed})
+            else:
+                outlines.append({"points": pts, "closed": path.closed})
+        return {"outlines": outlines, "holes": holes, "bend_lines": [], "dimensions": []}
 
-def _estimate_polygon_area(points: list[list[float]]) -> float:
-    """Shoelace formula for polygon area. Positive = CCW, Negative = CW."""
-    if len(points) < 3:
-        return 0.0
-    area = 0.0
-    n = len(points)
-    for i in range(n):
-        j = (i + 1) % n
-        area += points[i][0] * points[j][1]
-        area -= points[j][0] * points[i][1]
-    return area / 2.0
-
-
-def _estimate_perimeter(points: list[list[float]]) -> float:
-    """Calculate total perimeter length of polyline."""
-    if len(points) < 2:
-        return 0.0
-    perim = 0.0
-    for i in range(len(points) - 1):
-        dx = points[i + 1][0] - points[i][0]
-        dy = points[i + 1][1] - points[i][1]
-        perim += (dx * dx + dy * dy) ** 0.5
-    return perim
-
-
-def _estimate_radius(points: list[list[float]]) -> float:
-    """Estimate equivalent radius from centroid to farthest point."""
-    if len(points) < 3:
-        return 0.0
-    cx = sum(p[0] for p in points) / len(points)
-    cy = sum(p[1] for p in points) / len(points)
-    max_r = 0.0
-    for p in points:
-        dx = p[0] - cx
-        dy = p[1] - cy
-        max_r = max(max_r, (dx * dx + dy * dy) ** 0.5)
-    return max_r
-
-
-def _scale_geometry_items(items: list[dict], factor: float) -> list[dict]:
-    result = []
-    for item in items:
-        item = dict(item)
-        if "points" in item:
-            item["points"] = [[x * factor, y * factor] for x, y in item["points"]]
-        for key in ("cx", "cy", "r"):
-            if key in item:
-                item[key] = item[key] * factor
-        result.append(item)
-    return result
-
-
-def _count_geometry(geometry: dict) -> dict[str, int]:
-    return {
-        "outlines": len(geometry.get("outlines", [])),
-        "holes": len(geometry.get("holes", [])),
-        "lines": 0,
-        "polygons": len(geometry.get("polygons", [])),
-        "ellipses": 0,
-    }
-
-
-def _write_advanced_review(
-    geometry: dict,
-    source_name: str,
-    output_path: Path,
-    preset: str,
-    dxf_mode: str,
-) -> None:
-    counts = _count_geometry(geometry)
-    lines = [
-        f"# DXF Vectorization Review — {source_name}",
-        f"\n**Engine:** Advanced (VTracer)  |  **Preset:** {preset}  |  **Mode:** {dxf_mode}",
-        "\n## Geometry detected\n",
-        "| Entity  | Count | Layer |",
-        "|---------|-------|-------|",
-        f"| Outlines| {counts['outlines']:>5} | CUT   |",
-        f"| Holes   | {counts['holes']:>5} | CUT   |",
-        f"| Polygons| {counts['polygons']:>5} | ENGRAVE |",
-        "\n## Mode details\n",
-        f"- **Advanced engine**: VTracer open-source vectorization (colormode=binary)",
-        "- 100% local processing — no API keys",
-        f"- **Preset**: {preset}",
-        "- DXF layers: CUT (cut paths), ENGRAVE (filled regions)",
-    ]
-    output_path.write_text("\n".join(lines), encoding="utf-8")
+    def _write_review(self, model: PathModel, qa: Any, source_name: str,
+                       output_path: Path, preset: str, dxf_mode: str) -> None:
+        cal = model.calibration
+        coord = f"{cal.scale_factor:.4f} {cal.unit}/px" if cal and cal.is_valid else "pixel space"
+        lines = [
+            f"# DXF Vectorization Review — {source_name}",
+            f"\n**Engine:** Advanced (VTracer)  |  **Preset:** {preset}  |  **Mode:** {dxf_mode}  |  **Coords:** {coord}",
+            "\n## QA Summary\n",
+            "| Metric | Value |",
+            "|---|---|",
+            f"| Entities | {qa.entity_count} |",
+            f"| Closed | {qa.closed_path_count} |",
+            f"| Open | {qa.open_path_count} |",
+            f"| Self-intersections | {len(qa.self_intersections)} |",
+            f"| DXF audit | {'PASS' if qa.dxf_audit_pass else 'FAIL'} |",
+            "\n## Layers\n",
+        ]
+        for l in qa.layers:
+            lines.append(f"- {l.name} ({l.color_aci}): {l.entity_count} entities")
+        if qa.warnings:
+            lines.append("\n## Warnings\n")
+            for w in qa.warnings:
+                lines.append(f"- ⚠ {w}")
+        output_path.write_text("\n".join(lines), encoding="utf-8")
