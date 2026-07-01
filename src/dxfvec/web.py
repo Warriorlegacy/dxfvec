@@ -652,6 +652,11 @@ VIEWER_TEMPLATE = r'''
                    justify-content: center; background: #0f1117; font-size: 1rem; color: #8b949e; }
         #error-msg { display: none; position: absolute; inset: 0; align-items: center;
                      justify-content: center; background: #0f1117; color: #f85149; }
+        @media print {
+            header, #legend, #info, #loading, #error-msg { display: none !important; }
+            #canvas-wrap { position: absolute; inset: 0; }
+            canvas { max-width: 100%; max-height: 100%; }
+        }
     </style>
 </head>
 <body>
@@ -661,6 +666,8 @@ VIEWER_TEMPLATE = r'''
         <button class="btn" onclick="fitAll()">⊡ Fit All</button>
         <button class="btn btn-outline" onclick="zoom(1.3)">＋</button>
         <button class="btn btn-outline" onclick="zoom(0.7)">－</button>
+        <button class="btn btn-outline" onclick="printDXF()" style="background:#1f6feb;border-color:#1f6feb;">🖨 Print</button>
+        <button class="btn btn-outline" onclick="downloadPDF()" style="background:#9e6a03;border-color:#9e6a03;">📄 PDF</button>
         <a class="btn" href="/download/{{ filename }}" style="color:white;">⬇ Download</a>
         <a class="btn btn-outline" href="/files" style="color:#e1e4e8;">← All Files</a>
     </div>
@@ -869,12 +876,78 @@ canvas.addEventListener('wheel', e => {
 
 window.addEventListener('resize', () => { fitAll(); });
 
+function printDXF() {
+    window.print();
+}
+
+function downloadPDF() {
+    const scale = 3;
+    const pw = document.getElementById('canvas-wrap');
+    const pc = document.createElement('canvas');
+    pc.width = pw.clientWidth * scale;
+    pc.height = pw.clientHeight * scale;
+    const pctx = pc.getContext('2d');
+    pctx.scale(scale, scale);
+    pctx.fillStyle = BG;
+    pctx.fillRect(0, 0, pw.clientWidth, pw.clientHeight);
+    pctx.lineCap = 'round';
+    for (const ent of V.entities) {
+        const color = LAYER_COLORS_MAP[ent.layer] || '#aaaaaa';
+        pctx.strokeStyle = color;
+        pctx.lineWidth = 1.2;
+        if (ent.type === 'line') {
+            pctx.beginPath(); pctx.moveTo(wx(ent.x1), wy(ent.y1)); pctx.lineTo(wx(ent.x2), wy(ent.y2)); pctx.stroke();
+        } else if (ent.type === 'circle') {
+            pctx.beginPath(); pctx.arc(wx(ent.cx), wy(ent.cy), ent.r * zoom, 0, Math.PI * 2); pctx.stroke();
+        } else if (ent.type === 'polyline') {
+            pctx.beginPath();
+            ent.points.forEach((p, i) => { const s = {x: wx(p.x), y: wy(p.y)}; i === 0 ? pctx.moveTo(s.x, s.y) : pctx.lineTo(s.x, s.y); });
+            if (ent.closed) pctx.closePath(); pctx.stroke();
+        }
+    }
+    pc.toBlob(blob => {
+        const reader = new FileReader();
+        reader.onload = function() {
+            fetch('/api/pdf', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({image: reader.result})
+            }).then(r => r.blob()).then(pdfBlob => {
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(pdfBlob);
+                a.download = '{{ filename }}.pdf';
+                a.click(); URL.revokeObjectURL(a.href);
+            });
+        };
+        reader.readAsDataURL(blob);
+    }, 'image/png');
+}
+
 init();
 </script>
 </body>
 </html>
 '''
 
+
+@app.route("/api/pdf", methods=["POST"])
+def generate_pdf():
+    """Convert a canvas PNG data URL to a downloadable PDF using Pillow."""
+    import base64, io
+    from PIL import Image
+    data = request.get_json()
+    if not data or "image" not in data:
+        return jsonify({"error": "No image data"}), 400
+    try:
+        b64 = data["image"].split(",")[1] if "," in data["image"] else data["image"]
+        img = Image.open(io.BytesIO(base64.b64decode(b64)))
+        pdf_bytes = io.BytesIO()
+        img.save(pdf_bytes, "PDF", resolution=150)
+        pdf_bytes.seek(0)
+        return send_file(pdf_bytes, mimetype="application/pdf",
+                         as_attachment=True, download_name="dxfvec_output.pdf")
+    except Exception as e:
+        return jsonify({"error": f"PDF error: {e}"}), 500
 
 def main():
     import os
