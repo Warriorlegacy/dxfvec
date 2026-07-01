@@ -118,21 +118,68 @@ HTML_TEMPLATE = """
             <div class="upload-area" id="drop-zone">
                 <div class="upload-icon">📁</div>
                 <p>Drag & drop image here or click to browse</p>
-                <p style="color: #8b949e; font-size: 0.85rem; margin-top: 0.5rem;">PNG, JPG, BMP, TIFF</p>
+                <p style="color: #8b949e; font-size: 0.85rem; margin-top: 0.5rem;">PNG, JPG, WEBP, BMP, TIFF</p>
                 <input type="file" id="file-input" name="image" accept="image/*" style="display: none;">
             </div>
             
             <img id="preview" class="hidden" alt="Preview">
             
-            <div class="form-group">
-                <label for="scale">Scale (optional)</label>
-                <input type="text" id="scale" name="scale" placeholder="e.g. 64px=20mm or 3.2">
+            <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem;">
+                <div class="form-group">
+                    <label for="engine">Engine</label>
+                    <select id="engine" name="engine">
+                        <option value="classic">Classic (fast, local)</option>
+                        <option value="advanced">Advanced (VTracer AI)</option>
+                        <option value="cloud:vectorizer_ai">Cloud: Vectorizer.AI (BYOK)</option>
+                        <option value="cloud:dxfai">Cloud: DXFai (BYOK)</option>
+                    </select>
+                </div>
+                <div class="form-group">
+                    <label for="mode">DXF Mode</label>
+                    <select id="mode" name="mode">
+                        <option value="lines">Lines (cut paths)</option>
+                        <option value="hatch">Hatch (engrave fills)</option>
+                        <option value="faces">Faces (closed shapes)</option>
+                    </select>
+                </div>
             </div>
             
             <div class="form-group">
-                <label for="min-area">Min contour area</label>
-                <input type="text" id="min-area" name="min-area" value="100" placeholder="100">
+                <label for="preset">Preset</label>
+                <select id="preset" name="preset">
+                    <option value="">Custom / Manual</option>
+                    <option value="logo_engrave">Logo Engrave</option>
+                    <option value="laser_stencil">Laser Stencil</option>
+                    <option value="technical_drawing">Technical Drawing</option>
+                    <option value="contour_map">Contour Map</option>
+                </select>
             </div>
+            
+            <details style="margin:1rem 0;">
+                <summary style="color:#8b949e; cursor:pointer; font-size:0.9rem;">⚙ Expert settings</summary>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-top:1rem;">
+                    <div class="form-group">
+                        <label for="scale">Scale</label>
+                        <input type="text" id="scale" name="scale" placeholder="e.g. 64px=20mm or 3.2">
+                    </div>
+                    <div class="form-group">
+                        <label for="min-area">Min contour area</label>
+                        <input type="text" id="min-area" name="min-area" value="100" placeholder="100">
+                    </div>
+                    <div class="form-group">
+                        <label for="smoothing">Smoothing</label>
+                        <input type="text" id="smoothing" name="smoothing" value="1.5" placeholder="1.5">
+                    </div>
+                    <div class="form-group">
+                        <label for="corner">Corner sensitivity</label>
+                        <input type="text" id="corner" name="corner" value="60" placeholder="60">
+                    </div>
+                    <div class="form-group">
+                        <label for="noise-filter">Noise filter</label>
+                        <input type="text" id="noise-filter" name="noise-filter" value="3" placeholder="3">
+                    </div>
+                </div>
+            </details>
             
             <button type="submit" class="btn" id="submit-btn" disabled>Convert to DXF</button>
         </form>
@@ -254,6 +301,47 @@ def health():
     """Health check endpoint for deployment platforms."""
     return jsonify({"status": "ok", "service": "dxfvec", "version": "1.0.0"})
 
+@app.route("/api/engines")
+def list_engines_api():
+    from .engines import list_presets
+    return jsonify({
+        "engines": [
+            {"name": "classic", "label": "Classic (fast, local)", "available": True},
+            {"name": "advanced", "label": "Advanced (VTracer AI)", "available": True},
+            {"name": "cloud:vectorizer_ai", "label": "Cloud: Vectorizer.AI (BYOK)", "available": True},
+            {"name": "cloud:dxfai", "label": "Cloud: DXFai (BYOK)", "available": True},
+        ],
+        "presets": list_presets(),
+    })
+
+@app.route("/api/presets")
+def list_presets_api():
+    from .engines import list_presets
+    return jsonify(list_presets())
+
+@app.route("/api/providers")
+def list_providers_api():
+    from .cloud_providers import list_cloud_providers
+    return jsonify({"providers": list_cloud_providers()})
+
+def _parse_scale(scale_str: str) -> float | None:
+    import re
+    if not scale_str:
+        return None
+    if re.fullmatch(r"\d+(\.\d+)?", scale_str):
+        return float(scale_str)
+    m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*px\s*=\s*(\d+(?:\.\d+)?)\s*(mm|cm|in)", scale_str)
+    if m:
+        px = float(m.group(1))
+        real = float(m.group(2))
+        unit = m.group(3)
+        if unit == "in":
+            real *= 25.4
+        elif unit == "cm":
+            real *= 10
+        return px / real
+    return None
+
 @app.route("/convert", methods=["POST"])
 def convert():
     if "image" not in request.files:
@@ -264,11 +352,16 @@ def convert():
         return jsonify({"error": "No file selected"}), 400
 
     _cleanup_old_downloads()
-
     DOWNLOAD_DIR.mkdir(exist_ok=True)
 
+    engine = request.form.get("engine", "classic")
+    mode = request.form.get("mode", "lines")
+    preset = request.form.get("preset", "") or None
     scale = request.form.get("scale", "").strip() or None
-    min_area = int(request.form.get("min-area", 100))
+    smoothing = request.form.get("smoothing", "").strip()
+    corner = request.form.get("corner", "").strip()
+    noise_filter = request.form.get("noise-filter", "").strip()
+    min_area_str = request.form.get("min-area", "100").strip()
 
     try:
         import cv2
@@ -294,32 +387,59 @@ def convert():
             cv2.imwrite(str(resized_path), img)
             input_path = resized_path
 
-        scale_factor = None
-        if scale:
-            import re
-            if re.fullmatch(r"\d+(\.\d+)?", scale):
-                scale_factor = float(scale)
-            else:
-                m = re.fullmatch(r"(\d+(?:\.\d+)?)\s*px\s*=\s*(\d+(?:\.\d+)?)\s*(mm|cm|in)", scale)
-                if m:
-                    px = float(m.group(1))
-                    real = float(m.group(2))
-                    unit = m.group(3)
-                    if unit == "in":
-                        real *= 25.4
-                    elif unit == "cm":
-                        real *= 10
-                    scale_factor = px / real
-
-        from .vectorizer import vectorize_image
+        scale_factor = _parse_scale(scale)
+        min_area = int(min_area_str) if min_area_str.isdigit() else 100
         output_dir = Path(tmpdir) / "output"
 
+        # Build config
+        cfg = {
+            "dxf_mode": mode,
+            "cnc_layers": True,
+        }
+        if scale_factor is not None:
+            cfg["scale_factor"] = scale_factor
+        if min_area != 100:
+            cfg["min_area"] = min_area
+        if smoothing:
+            try:
+                cfg["simplify_tolerance"] = float(smoothing)
+            except ValueError:
+                pass
+        if corner:
+            try:
+                cfg["corner_threshold"] = float(corner)
+            except ValueError:
+                pass
+        if noise_filter:
+            try:
+                cfg["filter_speckle"] = int(noise_filter)
+            except ValueError:
+                pass
+
+        # Select and run engine
         try:
-            result = vectorize_image(
-                input_path, output_dir,
-                scale_factor=scale_factor,
-                min_area=min_area
-            )
+            if engine.startswith("cloud:"):
+                provider_name = engine.split(":", 1)[1]
+                from .cloud_providers import get_cloud_provider
+                provider = get_cloud_provider(provider_name)
+                if provider is None or not provider.is_available():
+                    return jsonify({"error": f"Cloud provider '{provider_name}' not configured"}), 400
+                if preset:
+                    from .engines import apply_preset
+                    cfg = apply_preset(cfg, preset)
+                result = provider.convert(input_path, output_dir, cfg)
+            elif engine == "advanced":
+                from .engines import AdvancedEngine, apply_preset
+                eng = AdvancedEngine()
+                if preset:
+                    cfg = apply_preset(cfg, preset)
+                result = eng.convert(input_path, output_dir, cfg)
+            else:
+                from .engines import ClassicEngine, apply_preset
+                eng = ClassicEngine()
+                if preset:
+                    cfg = apply_preset(cfg, preset)
+                result = eng.convert(input_path, output_dir, cfg)
         except Exception as e:
             return jsonify({"error": f"Vectorization error: {e}"}), 500
 
@@ -339,7 +459,7 @@ def convert():
 
     return jsonify({
         "filename": final_zip.name,
-        "stats": result["stats"]
+        "stats": result.get("stats", result.get("geometry", {})),
     })
 
 @app.route("/favicon.ico")
