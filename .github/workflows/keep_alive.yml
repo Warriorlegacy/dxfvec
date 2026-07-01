@@ -1,0 +1,15 @@
+name: Keep Alive Render Service
+
+on:
+  schedule:
+    # Run every 10 minutes to prevent Render's 15-minute spin-down
+    - cron: '*/10 * * * *'
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render Web Service
+        run: |
+          curl -s -f https://dxfvec.onrender.com/health || echo "Ping failed"
