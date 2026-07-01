@@ -253,6 +253,10 @@ HTML_TEMPLATE = """
                         <input type="checkbox" id="ai-enhance" name="ai-enhance" style="width:auto;accent-color:#58a6ff;">
                         <label for="ai-enhance" style="margin:0;cursor:pointer;">✨ AI Enhance (edge-aware denoising + gap closing)</label>
                     </div>
+                    <div class="form-group" style="display:flex;align-items:center;gap:0.75rem;margin-top:0.5rem;">
+                        <input type="checkbox" id="deskew-perspective" name="deskew-perspective" checked style="width:auto;accent-color:#58a6ff;">
+                        <label for="deskew-perspective" style="margin:0;cursor:pointer;">📐 Auto-Correct Perspective (Flat/Orthogonal Warp)</label>
+                    </div>
                 </div>
             </details>
             
@@ -462,6 +466,7 @@ def convert():
     min_area_str = request.form.get("min-area", "100").strip()
     threshold_str = request.form.get("threshold", "").strip()
     ai_enhance = request.form.get("ai-enhance") == "on"
+    deskew_perspective = request.form.get("deskew-perspective") == "on"
 
     try:
         import cv2
@@ -482,6 +487,12 @@ def convert():
         img = cv2.imread(str(input_path))
         if img is None:
             return jsonify({"error": "Cannot load image — unsupported format"}), 400
+
+        # Optional Perspective Deskewing
+        if deskew_perspective:
+            from .preprocess import deskew_perspective as _deskew_p
+            img = _deskew_p(img)
+            cv2.imwrite(str(input_path), img)
 
         h, w = img.shape[:2]
         max_dim = max(h, w)

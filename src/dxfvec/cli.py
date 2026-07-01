@@ -162,6 +162,12 @@ def cli() -> None:
     type=int,
     help="Noise filtering level (1-10, higher = more speckle removal).",
 )
+@click.option(
+    "--deskew-perspective",
+    is_flag=True,
+    default=False,
+    help="Detect largest quadrilateral and warp perspective to make it orthogonal.",
+)
 def convert(
     image: Path,
     engine: str,
@@ -173,10 +179,21 @@ def convert(
     smoothing: float | None,
     corner: float | None,
     noise_filter: int | None,
+    deskew_perspective: bool,
 ) -> None:
     """Convert a raster image to DXF using the selected engine."""
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    if deskew_perspective:
+        import cv2
+        from .preprocess import deskew_perspective as _deskew_p
+        img = cv2.imread(str(image))
+        if img is not None:
+            warped = _deskew_p(img)
+            temp_warped_path = output_dir / f"warped_{image.name}"
+            cv2.imwrite(str(temp_warped_path), warped)
+            image = temp_warped_path
 
     scale_str = "no scale"
     if scale:
