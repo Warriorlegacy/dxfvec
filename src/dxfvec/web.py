@@ -32,6 +32,68 @@ MAX_IMAGE_DIM = 2048
 DOWNLOAD_TTL_SECONDS = 3600
 
 
+def _generate_preview_svg(dxf_path: Path, out_path: Path) -> Path | None:
+    """Generate a simple SVG preview from a DXF file using ezdxf."""
+    try:
+        import ezdxf
+        doc = ezdxf.readfile(str(dxf_path))
+        msp = doc.modelspace()
+
+        minx = miny = float("inf")
+        maxx = maxy = float("-inf")
+        lines_svg = []
+        for ent in msp:
+            if ent.dxftype() == "LINE":
+                x1, y1, x2, y2 = ent.dxf.start.x, ent.dxf.start.y, ent.dxf.end.x, ent.dxf.end.y
+                minx = min(minx, x1, x2)
+                maxx = max(maxx, x1, x2)
+                miny = min(miny, y1, y2)
+                maxy = max(maxy, y1, y2)
+                lines_svg.append(f'<line x1="{x1}" y1="{-y1}" x2="{x2}" y2="{-y2}" stroke="red" stroke-width="0.5"/>')
+            elif ent.dxftype() == "LWPOLYLINE":
+                pts = ent.get_points()
+                if not pts:
+                    continue
+                for p in pts:
+                    minx = min(minx, p[0]); maxx = max(maxx, p[0])
+                    miny = min(miny, p[1]); maxy = max(maxy, p[1])
+                d = " ".join(f'{"M" if i==0 else "L"}{p[0]},{ -p[1]}' for i,p in enumerate(pts))
+                if ent.closed:
+                    d += " Z"
+                lines_svg.append(f'<path d="{d}" stroke="red" stroke-width="0.5" fill="none"/>')
+
+        if not lines_svg:
+            return None
+        w = maxx - minx or 100; h = maxy - miny or 100
+        svg_content = f"""<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="{minx} {-maxy} {w} {h}" width="{w}" height="{h}">
+<rect x="{minx}" y="{-maxy}" width="{w}" height="{h}" fill="#1a1d23"/>
+<style>path,line{{stroke-linecap:round;stroke-linejoin:round}}</style>
+{"".join(lines_svg)}
+</svg>"""
+        out_path.write_text(svg_content, encoding="utf-8")
+        return out_path
+    except Exception:
+        return None
+
+
+def _generate_png_preview(dxf_path: Path, img, out_path: Path) -> Path | None:
+    """Generate a thumbnail PNG preview using the original image as a reference."""
+    try:
+        from PIL import Image
+        h, w = img.shape[:2]
+        max_dim = max(h, w)
+        if max_dim > 800:
+            ratio = 800 / max_dim
+            w, h = int(w * ratio), int(h * ratio)
+        preview = cv2.resize(img, (w, h), interpolation=cv2.INTER_AREA)
+        preview_rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
+        Image.fromarray(preview_rgb).save(str(out_path), "PNG")
+        return out_path
+    except Exception:
+        return None
+
+
 def _cleanup_old_downloads():
     try:
         if DOWNLOAD_DIR.exists():
@@ -167,6 +229,11 @@ HTML_TEMPLATE = """
                         <input type="text" id="min-area" name="min-area" value="100" placeholder="100">
                     </div>
                     <div class="form-group">
+                        <label for="threshold">Threshold</label>
+                        <input type="range" id="threshold" name="threshold" min="0" max="255" value="127">
+                        <span id="threshold-val" style="color:#8b949e;font-size:0.85rem;">127</span>
+                    </div>
+                    <div class="form-group">
                         <label for="smoothing">Smoothing</label>
                         <input type="text" id="smoothing" name="smoothing" value="1.5" placeholder="1.5">
                     </div>
@@ -197,6 +264,10 @@ HTML_TEMPLATE = """
         const resultDiv = document.getElementById('result');
         const errorDiv = document.getElementById('error');
         
+        document.getElementById('threshold').addEventListener('input', function() {
+            document.getElementById('threshold-val').textContent = this.value;
+        });
+
         dropZone.addEventListener('click', () => fileInput.click());
         
         dropZone.addEventListener('dragover', (e) => {
@@ -253,29 +324,31 @@ HTML_TEMPLATE = """
                 
                 const data = await response.json();
                 
+                const s = data.stats || {};
                 resultDiv.innerHTML = `
                     <h3>Conversion Complete</h3>
                     <div class="stats">
                         <div class="stat">
-                            <div class="stat-value">${data.stats.outlines}</div>
+                            <div class="stat-value">${s.outlines || 0}</div>
                             <div class="stat-label">Outlines</div>
                         </div>
                         <div class="stat">
-                            <div class="stat-value">${data.stats.holes}</div>
+                            <div class="stat-value">${s.holes || 0}</div>
                             <div class="stat-label">Holes</div>
                         </div>
                         <div class="stat">
-                            <div class="stat-value">${data.stats.lines}</div>
+                            <div class="stat-value">${s.lines || 0}</div>
                             <div class="stat-label">Lines</div>
                         </div>
                         <div class="stat">
-                            <div class="stat-value">${data.stats.polygons}</div>
+                            <div class="stat-value">${s.polygons || 0}</div>
                             <div class="stat-label">Polygons</div>
                         </div>
                     </div>
                     <div style="display:flex; gap:0.75rem; margin-top:1rem;">
                         <a href="/view/${data.filename}" class="download-btn" style="background:#1f6feb;">🔍 View DXF</a>
                         <a href="/download/${data.filename}" class="download-btn">⬇ Download DXF</a>
+                        ${data.has_svg ? `<a href="/api/svg/${data.filename}" class="download-btn" style="background:#238636;">⬇ SVG</a>` : ''}
                     </div>
                 `;
                 resultDiv.classList.remove('hidden');
@@ -318,6 +391,23 @@ def list_engines_api():
 def list_presets_api():
     from .engines import list_presets
     return jsonify(list_presets())
+
+@app.route("/api/preview/<filename>")
+def original_preview(filename):
+    """Serve the original image preview from a DXF zip."""
+    zip_path = DOWNLOAD_DIR / filename
+    if not zip_path.exists():
+        return jsonify({"error": "Preview not found"}), 404
+    try:
+        import zipfile
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            if "original_preview.png" in zf.namelist():
+                data = zf.read("original_preview.png")
+                from io import BytesIO
+                return send_file(BytesIO(data), mimetype="image/png")
+    except Exception:
+        pass
+    return jsonify({"error": "No preview available"}), 404
 
 @app.route("/api/providers")
 def list_providers_api():
@@ -362,6 +452,7 @@ def convert():
     corner = request.form.get("corner", "").strip()
     noise_filter = request.form.get("noise-filter", "").strip()
     min_area_str = request.form.get("min-area", "100").strip()
+    threshold_str = request.form.get("threshold", "").strip()
 
     try:
         import cv2
@@ -415,6 +506,26 @@ def convert():
                 cfg["filter_speckle"] = int(noise_filter)
             except ValueError:
                 pass
+        if threshold_str:
+            try:
+                cfg["threshold"] = int(threshold_str)
+            except ValueError:
+                pass
+
+        # Save a preview of the original image for the viewer
+        orig_preview_path = output_dir / "original_preview.png"
+        try:
+            preview_h, preview_w = img.shape[:2]
+            max_p = max(preview_h, preview_w)
+            if max_p > 800:
+                ratio = 800 / max_p
+                preview_h, preview_w = int(preview_h * ratio), int(preview_w * ratio)
+                preview_img = cv2.resize(img, (preview_w, preview_h), interpolation=cv2.INTER_AREA)
+            else:
+                preview_img = img
+            cv2.imwrite(str(orig_preview_path), preview_img)
+        except Exception:
+            orig_preview_path = None
 
         # Select and run engine
         try:
@@ -447,12 +558,23 @@ def convert():
         if not dxf_path.exists():
             return jsonify({"error": "DXF generation failed"}), 500
 
+        # Generate SVG alongside DXF for multi-format bundle
+        svg_path = _generate_preview_svg(dxf_path, output_dir / "preview.svg")
+        # Generate PNG preview from the DXF using ezdxf
+        png_preview_path = _generate_png_preview(dxf_path, img, output_dir / "preview.png")
+
         zip_path = Path(tmpdir) / "result.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.write(dxf_path, dxf_path.name)
             review_src = Path(result["review"])
             if review_src.exists():
                 zf.write(review_src, "review.md")
+            if svg_path and svg_path.exists():
+                zf.write(svg_path, f"{input_path.stem}.svg")
+            if png_preview_path and png_preview_path.exists():
+                zf.write(png_preview_path, f"{input_path.stem}_preview.png")
+            if orig_preview_path and orig_preview_path.exists():
+                zf.write(orig_preview_path, "original_preview.png")
 
         final_zip = DOWNLOAD_DIR / f"{input_path.stem}.zip"
         final_zip.write_bytes(zip_path.read_bytes())
@@ -460,6 +582,8 @@ def convert():
     return jsonify({
         "filename": final_zip.name,
         "stats": result.get("stats", result.get("geometry", {})),
+        "has_svg": bool(svg_path and svg_path.exists()),
+        "has_preview": bool(orig_preview_path and orig_preview_path.exists()),
     })
 
 @app.route("/favicon.ico")
@@ -786,8 +910,10 @@ VIEWER_TEMPLATE = r'''
         <button class="btn" onclick="fitAll()">⊡ Fit All</button>
         <button class="btn btn-outline" onclick="_zoom(1.3)">＋</button>
         <button class="btn btn-outline" onclick="_zoom(0.7)">－</button>
-        <button class="btn btn-outline" onclick="printDXF()" style="background:#1f6feb;border-color:#1f6feb;">🖨 Print</button>
-        <button class="btn btn-outline" onclick="downloadPDF()" style="background:#9e6a03;border-color:#9e6a03;">📄 PDF</button>
+        <button class="btn btn-outline" id="mode-btn" onclick="toggleViewMode()" style="background:#1f6feb;border-color:#1f6feb;">Vector</button>
+        <button class="btn btn-outline" id="nodes-btn" onclick="toggleNodes()" style="background:#9e6a03;border-color:#9e6a03;">Nodes</button>
+        <button class="btn btn-outline" onclick="printDXF()" style="background:#1f6feb;">🖨 Print</button>
+        <button class="btn btn-outline" onclick="downloadPDF()" style="background:#9e6a03;">📄 PDF</button>
         <a class="btn" href="/download/{{ filename }}" style="color:white;">⬇ Download</a>
         <a class="btn btn-outline" href="/files" style="color:#e1e4e8;">← All Files</a>
     </div>
@@ -812,6 +938,9 @@ const GRID = "#252830";
 
 let V = { entities: [], layers: [], bbox: null };
 let pan = {x: 0, y: 0}, viewZoom = 1, dragging = null;
+let viewMode = 'vector'; // 'vector', 'raster', 'overlay'
+let showNodes = false;
+let origImage = null;
 
 function hexToRgba(hex, a) {
     const n = parseInt(hex.slice(1), 16);
@@ -825,6 +954,15 @@ async function init() {
         V = await res.json();
         buildLegend();
         fitAll();
+        // Load original image for overlay / raster mode
+        const previewUrl = '/api/preview/{{ filename }}';
+        const previewRes = await fetch(previewUrl);
+        if (previewRes.ok) {
+            const blob = await previewRes.blob();
+            origImage = new Image();
+            origImage.src = URL.createObjectURL(blob);
+            await new Promise(r => { origImage.onload = r; });
+        }
         draw();
         document.getElementById('loading').style.display = 'none';
     } catch (e) {
@@ -904,7 +1042,27 @@ const LAYER_COLORS_MAP = {
 function draw() {
     ctx.fillStyle = BG;
     ctx.fillRect(0, 0, canvas.width, canvas.height);
-    drawGrid();
+
+    // Draw original image in raster or overlay mode
+    if ((viewMode === 'raster' || viewMode === 'overlay') && origImage && origImage.complete && origImage.naturalWidth > 0) {
+        if (viewMode === 'raster') {
+            ctx.globalAlpha = 1.0;
+            ctx.drawImage(origImage, 0, 0, canvas.width, canvas.height);
+            ctx.globalAlpha = 1.0;
+            const n = V.entities.length;
+            const info = document.getElementById('info');
+            info.textContent = `Entities: ${n} | Raster` + (V.bbox ? ` | Zoom: ${(viewZoom*100).toFixed(0)}%` : '');
+            return;
+        } else {
+            ctx.globalAlpha = 0.4;
+            ctx.drawImage(origImage, 0, 0, canvas.width, canvas.height);
+            ctx.globalAlpha = 1.0;
+        }
+    }
+
+    if (viewMode !== 'raster') {
+        drawGrid();
+    }
 
     const lc = LAYER_COLORS_MAP;
     ctx.lineCap = 'round';
@@ -952,9 +1110,40 @@ function draw() {
         }
     }
 
+    // Draw nodes if enabled
+    if (showNodes) {
+        ctx.fillStyle = '#ffffff';
+        for (const ent of V.entities) {
+            if (ent.type === 'polyline' && ent.points) {
+                for (const p of ent.points) {
+                    ctx.fillRect(wx(p.x) - 1.5, wy(p.y) - 1.5, 3, 3);
+                }
+            } else if (ent.type === 'line') {
+                ctx.fillRect(wx(ent.x1) - 1.5, wy(ent.y1) - 1.5, 3, 3);
+                ctx.fillRect(wx(ent.x2) - 1.5, wy(ent.y2) - 1.5, 3, 3);
+            }
+        }
+    }
+
     const n = V.entities.length;
     const info = document.getElementById('info');
-    info.textContent = `Entities: ${n}` + (V.bbox ? ` | Zoom: ${(viewZoom*100).toFixed(0)}%` : '');
+    const modeLabel = viewMode === 'raster' ? 'Raster' : viewMode === 'overlay' ? 'Overlay' : 'Vector';
+    info.textContent = `Entities: ${n} | ${modeLabel}` + (V.bbox ? ` | Zoom: ${(viewZoom*100).toFixed(0)}%` : '') + (showNodes ? ' | Nodes: ON' : '');
+}
+
+function toggleViewMode() {
+    const modes = ['vector', 'raster', 'overlay'];
+    const labels = ['Vector', 'Raster', 'Overlay'];
+    const idx = (modes.indexOf(viewMode) + 1) % modes.length;
+    viewMode = modes[idx];
+    document.getElementById('mode-btn').textContent = labels[idx];
+    draw();
+}
+
+function toggleNodes() {
+    showNodes = !showNodes;
+    document.getElementById('nodes-btn').style.background = showNodes ? '#238636' : '#9e6a03';
+    draw();
 }
 
 function wx(x) { return x * viewZoom + pan.x; }
@@ -1049,6 +1238,24 @@ init();
 </html>
 '''
 
+
+@app.route("/api/svg/<filename>")
+def svg_download(filename):
+    """Extract SVG from a zip bundle."""
+    zip_path = DOWNLOAD_DIR / filename
+    if not zip_path.exists():
+        return jsonify({"error": "File not found"}), 404
+    try:
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            svg_name = filename.replace(".zip", ".svg")
+            if svg_name in zf.namelist():
+                data = zf.read(svg_name)
+                from io import BytesIO
+                return send_file(BytesIO(data), mimetype="image/svg+xml",
+                               as_attachment=True, download_name=svg_name)
+    except Exception:
+        pass
+    return jsonify({"error": "SVG not found in bundle"}), 404
 
 @app.route("/api/pdf", methods=["POST"])
 def generate_pdf():
