@@ -300,29 +300,38 @@ class ShapeDetector:
         return sorted(out, key=lambda x: x["area"], reverse=True)
 
     @staticmethod
-    def detect_circles(binary: np.ndarray, min_r: int = 8, max_r: int = 80,
-                       contour_mask: np.ndarray | None = None) -> list[dict]:
-        if binary.dtype != np.uint8:
-            binary = binary.astype(np.uint8)
-        cs = cv2.HoughCircles(binary, cv2.HOUGH_GRADIENT, dp=1, minDist=25,
-                               param1=60, param2=35, minRadius=min_r,
-                               maxRadius=max_r)
-        if cs is None:
-            return []
-        result = []
-        if contour_mask is not None:
-            for x, y, r in cs[0]:
-                cx, cy = int(x), int(y)
-                if 0 <= cy < contour_mask.shape[0] and 0 <= cx < contour_mask.shape[1]:
-                    if contour_mask[cy, cx] == 0:
+    def detect_circles(contours: list[np.ndarray], min_r: int = 8, max_r: int = 150) -> Tuple[list[dict], list[np.ndarray]]:
+        circles = []
+        remaining = []
+        for c in contours:
+            area = cv2.contourArea(c)
+            if area < 50:
+                remaining.append(c)
+                continue
+            perimeter = cv2.arcLength(c, True)
+            if perimeter == 0:
+                remaining.append(c)
+                continue
+            # Circularity metric
+            circularity = 4.0 * np.pi * area / (perimeter * perimeter)
+            if circularity >= 0.78:
+                (x, y), radius = cv2.minEnclosingCircle(c)
+                if min_r <= radius <= max_r:
+                    # Verify radius consistency of contour points
+                    pts = c.reshape(-1, 2)
+                    dists = np.linalg.norm(pts - np.array([x, y]), axis=1)
+                    mean_d = np.mean(dists)
+                    std_d = np.std(dists)
+                    if mean_d > 0 and (std_d / mean_d) < 0.12:
+                        circles.append({
+                            "cx": float(x),
+                            "cy": float(y),
+                            "r": float(radius),
+                            "area": float(area)
+                        })
                         continue
-                result.append({"cx": float(x), "cy": float(y), "r": float(r),
-                               "area": float(np.pi * r * r)})
-        else:
-            for x, y, r in cs[0]:
-                result.append({"cx": float(x), "cy": float(y), "r": float(r),
-                               "area": float(np.pi * r * r)})
-        return result
+            remaining.append(c)
+        return circles, remaining
 
     @staticmethod
     def detect_lines(binary: np.ndarray, min_len: int = 40) -> list[dict]:
@@ -537,40 +546,25 @@ class Vectorizer:
         min_a = self.min_area if is_drawing else max(self.min_area, 200)
         detector = ShapeDetector(min_area=min_a, retr_mode=self.retr_mode)
 
-        # Build a filled-contour mask so circles can check: "am I inside a shape?"
-        contour_mask = np.zeros(binary.shape[:2], dtype=np.uint8)
-        all_contours, _ = cv2.findContours(
-            binary, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        cv2.drawContours(contour_mask, all_contours, -1, 255, thickness=cv2.FILLED)
-
         contours  = detector.detect_contours(binary)
-        outlines  = detector.detect_outlines(contours, self.simplify_tolerance)
+
+        # Detect circles from contours first and separate them
+        holes, remaining_contours = detector.detect_circles(contours)
+
+        outlines  = detector.detect_outlines(remaining_contours, self.simplify_tolerance)
 
         # For drawing mode: polygons from contours; for photo: outline-sized shapes only
         if is_drawing:
-            polygons = detector.detect_polygons(contours)
+            polygons = detector.detect_polygons(remaining_contours)
             ellipses = []
         else:
             polygons = []            # outlines capture the filled shapes
-            ellipses = detector.detect_ellipses(contours)
+            ellipses = detector.detect_ellipses(remaining_contours)
 
         # Photo mode: merge nearby outlines into single large silhouettes
         # so a fragmented hatching boundary collapses into one clean shape
         if not is_drawing and len(outlines) > 1:
             outlines = _merge_nearby_outlines(outlines, max_centroid_gap_px=30)
-
-        # Circles: suppress if centre is inside an existing outline (noise)
-        outline_centroids = np.array(
-            [np.mean(o["points"], axis=0) for o in outlines], dtype=np.int32)
-        suppress = set()
-        for ci, co in enumerate(outline_centroids):
-            if 0 <= co[1] < contour_mask.shape[0] and 0 <= co[0] < contour_mask.shape[1]:
-                if contour_mask[co[1], co[0]] > 0:
-                    suppress.add(ci)
-
-        raw_circles = detector.detect_circles(binary, contour_mask=contour_mask)
-        holes = [h for i, h in enumerate(raw_circles)
-                 if i not in suppress and h["area"] > 500]
 
         # Lines: filter highly-duplicate segments that overlap outlines
         raw_lines = detector.detect_lines(binary)

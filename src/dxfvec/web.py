@@ -469,8 +469,14 @@ def convert():
     except ImportError:
         return jsonify({"error": "Server misconfigured: OpenCV not available"}), 500
 
+    from werkzeug.utils import secure_filename
+    orig_filename = secure_filename(file.filename)
+    if not orig_filename or not orig_filename.strip():
+        orig_filename = "drawing.png"
+    original_stem = Path(orig_filename).stem
+
     with tempfile.TemporaryDirectory() as tmpdir:
-        input_path = Path(tmpdir) / file.filename
+        input_path = Path(tmpdir) / orig_filename
         file.save(str(input_path))
 
         img = cv2.imread(str(input_path))
@@ -483,7 +489,7 @@ def convert():
             scale_px = MAX_IMAGE_DIM / max_dim
             new_w, new_h = int(w * scale_px), int(h * scale_px)
             img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
-            resized_path = Path(tmpdir) / f"resized_{file.filename}"
+            resized_path = Path(tmpdir) / f"resized_{orig_filename}"
             cv2.imwrite(str(resized_path), img)
             input_path = resized_path
 
@@ -590,13 +596,13 @@ def convert():
             if review_src.exists():
                 zf.write(review_src, "review.md")
             if svg_path and svg_path.exists():
-                zf.write(svg_path, f"{input_path.stem}.svg")
+                zf.write(svg_path, f"{original_stem}.svg")
             if png_preview_path and png_preview_path.exists():
-                zf.write(png_preview_path, f"{input_path.stem}_preview.png")
+                zf.write(png_preview_path, f"{original_stem}_preview.png")
             if orig_preview_path and orig_preview_path.exists():
                 zf.write(orig_preview_path, "original_preview.png")
 
-        final_zip = DOWNLOAD_DIR / f"{input_path.stem}.zip"
+        final_zip = DOWNLOAD_DIR / f"{original_stem}.zip"
         final_zip.write_bytes(zip_path.read_bytes())
 
     return jsonify({
