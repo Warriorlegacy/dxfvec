@@ -109,10 +109,7 @@ def deskew_perspective(img: np.ndarray) -> np.ndarray:
             # Area must be at least 5% of downscaled image
             if cv2.contourArea(c) > (small.shape[0] * small.shape[1] * 0.05):
                 hull = cv2.convexHull(c)
-                peri = cv2.arcLength(hull, True)
-                approx = cv2.approxPolyDP(hull, 0.04 * peri, True)
-                if len(approx) == 4:
-                    best_rect = approx.reshape(4, 2) / scale
+                best_rect = hull.reshape(-1, 2) / scale
     except Exception:
         pass
 
