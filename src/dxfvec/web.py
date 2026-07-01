@@ -167,6 +167,10 @@ HTML_TEMPLATE = """
                 <p>Rotate, resize, enhance, denoise, sharpen, deskew</p>
             </div>
             <div class="feature">
+                <h4>✨ AI Enhance</h4>
+                <p>Edge-aware denoising (bilateral + mean-shift) for crisp DXF output</p>
+            </div>
+            <div class="feature">
                 <h4>📐 Vectorize</h4>
                 <p>Auto-detect outlines, holes, lines, polygons</p>
             </div>
@@ -244,6 +248,10 @@ HTML_TEMPLATE = """
                     <div class="form-group">
                         <label for="noise-filter">Noise filter</label>
                         <input type="text" id="noise-filter" name="noise-filter" value="3" placeholder="3">
+                    </div>
+                    <div class="form-group" style="display:flex;align-items:center;gap:0.75rem;margin-top:0.75rem;">
+                        <input type="checkbox" id="ai-enhance" name="ai-enhance" style="width:auto;accent-color:#58a6ff;">
+                        <label for="ai-enhance" style="margin:0;cursor:pointer;">✨ AI Enhance (edge-aware denoising + gap closing)</label>
                     </div>
                 </div>
             </details>
@@ -453,6 +461,7 @@ def convert():
     noise_filter = request.form.get("noise-filter", "").strip()
     min_area_str = request.form.get("min-area", "100").strip()
     threshold_str = request.form.get("threshold", "").strip()
+    ai_enhance = request.form.get("ai-enhance") == "on"
 
     try:
         import cv2
@@ -477,6 +486,17 @@ def convert():
             resized_path = Path(tmpdir) / f"resized_{file.filename}"
             cv2.imwrite(str(resized_path), img)
             input_path = resized_path
+
+        # Optional AI-style edge-aware enhancement
+        if ai_enhance:
+            from .ai_enhancer import enhance as _enhance_ai
+            gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            enhanced = _enhance_ai(gray)
+            enhanced_bgr = cv2.cvtColor(enhanced, cv2.COLOR_GRAY2BGR)
+            ai_prep_path = Path(tmpdir) / "ai_enhanced.png"
+            cv2.imwrite(str(ai_prep_path), enhanced_bgr)
+            input_path = ai_prep_path
+            img = enhanced_bgr
 
         scale_factor = _parse_scale(scale)
         min_area = int(min_area_str) if min_area_str.isdigit() else 100
@@ -656,11 +676,16 @@ def _dxf_to_json(dxf_path: Path) -> dict:
                        "cx": ent.dxf.center.x, "cy": ent.dxf.center.y,
                        "r": float(ent.dxf.radius)})
         elif ent.dxftype() == "ELLIPSE":
+            try:
+                axis = ent.dxf.major_axis
+                angle = math.degrees(math.atan2(axis.y, axis.x))
+            except Exception:
+                angle = 0.0
             e.update({"type": "ellipse",
                        "cx": ent.dxf.center.x, "cy": ent.dxf.center.y,
                        "a": float(ent.dxf.major_axis.magnitude),
                        "b": float(ent.dxf.major_axis.magnitude * ent.dxf.ratio),
-                       "angle": float(ent.dxf.rotation * 180 / math.pi)})
+                       "angle": angle})
         elif ent.dxftype() == "POINT":
             e.update({"type": "point",
                        "x": ent.dxf.location.x, "y": ent.dxf.location.y})

@@ -5,6 +5,9 @@ Supports three engines:
   - Advanced: local VTracer AI-style vectorization (no API keys)
   - Cloud AI: external APIs — BYOK (Vectorizer.AI, DXFai)
 
+AI enhancement:
+  - Edge-aware denoising (bilateral + mean-shift filter) for crisp output
+
 Also supports:
   - Multi-agent CrewAI pipeline
   - Vision LLM pipeline (Anthropic, OpenAI, Google, etc.)
@@ -23,6 +26,7 @@ from .cloud_providers import (
 from .vectorizer import vectorize_image, Vectorizer, ImageModifier, ShapeDetector, DXFGenerator
 from .dxf_writer import create_dxf
 from .preprocess import preprocess
+from .ai_enhancer import enhance, AIEnhancer, AIEnhancerConfig
 
 __all__ = [
     # Engines
@@ -47,4 +51,7 @@ __all__ = [
     "create_dxf",
     # Preprocessing
     "preprocess",
+    # AI Enhancer
+    "enhance",
+    "AIEnhancer",
 ]

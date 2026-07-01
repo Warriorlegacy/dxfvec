@@ -5,8 +5,9 @@ Steps:
   2. CLAHE contrast enhancement
   3. Fast non-local means denoising
   4. Deskew (Hough-based rotation correction)
-  5. Adaptive binarisation
-  6. Invert if needed (dark-on-white = standard engineering drawing)
+  5. Optional AI-style edge-aware enhancement (bilateral + mean-shift)
+  6. Adaptive binarisation
+  7. Invert if needed (dark-on-white = standard engineering drawing)
 
 Returns the preprocessed image as a numpy array and saves to disk.
 """
@@ -17,8 +18,17 @@ from pathlib import Path
 import cv2
 import numpy as np
 
+from dxfvec.ai_enhancer import enhance as _ai_enhance
 
-def preprocess(image_path: str | Path, output_path: str | Path) -> np.ndarray:
+
+def preprocess(
+    image_path: str | Path,
+    output_path: str | Path,
+    ai_enhance: bool = False,
+    bilateral_d: int = 9,
+    mean_shift_radius: int = 7,
+    morph_kernel: int = 3,
+) -> np.ndarray:
     """Preprocess a raster drawing image and save to output_path."""
     image_path = Path(image_path)
     output_path = Path(output_path)
@@ -39,7 +49,16 @@ def preprocess(image_path: str | Path, output_path: str | Path) -> np.ndarray:
     # 3. Deskew
     deskewed = _deskew(denoised)
 
-    # 4. Adaptive binarisation
+    # 4. Optional AI-style edge-aware enhancement
+    if ai_enhance:
+        deskewed = _ai_enhance(
+            deskewed,
+            bilateral_d=bilateral_d,
+            mean_shift_spatial_radius=mean_shift_radius,
+            morph_kernel_size=morph_kernel,
+        )
+
+    # 5. Adaptive binarisation
     binary = cv2.adaptiveThreshold(
         deskewed, 255,
         cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
