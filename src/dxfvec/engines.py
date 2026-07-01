@@ -425,6 +425,7 @@ class AdvancedEngine(BaseEngine):
             "geometry": self._model_to_geometry(model),
             "engine": self.name,
             "dxf_mode": dxf_mode_str,
+            "review": str(output_dir / "review.md"),
             "stats": {
                 "paths": model.entity_count(),
                 "closed": model.closed_path_count(),

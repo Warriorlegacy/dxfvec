@@ -587,6 +587,7 @@ class Vectorizer:
             },
             "geometry": geometry,
             "model": model,
+            "review": str(output_dir / "review.md"),
             "stats": {
                 "paths": model.entity_count(),
                 "closed": model.closed_path_count(),
