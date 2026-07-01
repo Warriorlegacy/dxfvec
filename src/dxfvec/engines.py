@@ -297,7 +297,67 @@ class AdvancedEngine(BaseEngine):
             vcfg.update({"filter_speckle": 1, "corner_threshold": 90,
                          "length_threshold": 2.0, "colormode": "color"})
 
-        vtracer.convert_image_to_svg_py(str(image_path), str(svg_path), **vcfg)
+        # Extract and cast config values to their correct type to pass positionally,
+        # preventing PyO3 / native library crashes caused by keyword arguments or float types.
+        colormode = str(vcfg.get("colormode", "binary"))
+        hierarchical = str(vcfg.get("hierarchical", "stacked"))
+        mode = str(vcfg.get("mode", "spline"))
+        
+        try:
+            filter_speckle = int(float(vcfg.get("filter_speckle", 4)))
+        except (ValueError, TypeError):
+            filter_speckle = 4
+            
+        try:
+            color_precision = int(float(vcfg.get("color_precision", 6)))
+        except (ValueError, TypeError):
+            color_precision = 6
+            
+        try:
+            layer_difference = int(float(vcfg.get("layer_difference", 16)))
+        except (ValueError, TypeError):
+            layer_difference = 16
+            
+        try:
+            corner_threshold = int(float(vcfg.get("corner_threshold", 60)))
+        except (ValueError, TypeError):
+            corner_threshold = 60
+            
+        try:
+            length_threshold = float(vcfg.get("length_threshold", 4.0))
+        except (ValueError, TypeError):
+            length_threshold = 4.0
+            
+        try:
+            max_iterations = int(float(vcfg.get("max_iterations", vcfg.get("segment_length", 10))))
+        except (ValueError, TypeError):
+            max_iterations = 10
+            
+        try:
+            splice_threshold = int(float(vcfg.get("splice_threshold", 45)))
+        except (ValueError, TypeError):
+            splice_threshold = 45
+            
+        try:
+            path_precision = int(float(vcfg.get("path_precision", 8)))
+        except (ValueError, TypeError):
+            path_precision = 8
+
+        vtracer.convert_image_to_svg_py(
+            str(image_path),
+            str(svg_path),
+            colormode,
+            hierarchical,
+            mode,
+            filter_speckle,
+            color_precision,
+            layer_difference,
+            corner_threshold,
+            length_threshold,
+            max_iterations,
+            splice_threshold,
+            path_precision
+        )
 
         # Parse SVG paths and convert to DXF geometry
         geometry = _svg_to_geometry(svg_path, cfg.get("scale_factor"))
