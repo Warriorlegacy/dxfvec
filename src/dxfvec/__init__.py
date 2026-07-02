@@ -63,6 +63,7 @@ __all__ = [
     # AI Enhancer
     "enhance",
     "AIEnhancer",
+    "AIEnhancerConfig",
     # Path model (canonical geometry)
     "PathModel",
     "Path",

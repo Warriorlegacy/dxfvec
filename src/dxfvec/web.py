@@ -3,13 +3,13 @@
 Usage:
   python -m dxfvec.web
   # Then open http://localhost:5000
-  
+
 Production:
   gunicorn --bind 0.0.0.0:5000 --workers 1 dxfvec.web:app
 """
 from __future__ import annotations
 
-import json
+import logging
 import math
 import tempfile
 import time
@@ -21,6 +21,16 @@ import ezdxf
 from flask import Flask, render_template_string, request, send_file, jsonify
 from flask_cors import CORS
 
+# Structured logging
+logger = logging.getLogger("dxfvec")
+logger.setLevel(logging.INFO)
+if not logger.handlers:
+    _handler = logging.StreamHandler()
+    _handler.setFormatter(logging.Formatter(
+        "%(asctime)s [%(levelname)s] %(message)s"
+    ))
+    logger.addHandler(_handler)
+
 app = Flask(__name__)
 CORS(app)
 
@@ -30,6 +40,44 @@ app.config['MAX_CONTENT_LENGTH'] = 10 * 1024 * 1024
 DOWNLOAD_DIR = Path(tempfile.gettempdir()) / "dxfvec_downloads"
 MAX_IMAGE_DIM = 2048
 DOWNLOAD_TTL_SECONDS = 3600
+
+# Allowed MIME types for upload security
+ALLOWED_MIME_TYPES = {
+    "image/png", "image/jpeg", "image/webp", "image/bmp", "image/tiff",
+}
+
+# Simple in-memory rate limiter
+_rate_limit_store: dict[str, list[float]] = {}
+RATE_LIMIT_MAX = 30
+RATE_LIMIT_WINDOW = 60
+
+
+def _check_rate_limit(ip: str) -> bool:
+    now = time.time()
+    window_start = now - RATE_LIMIT_WINDOW
+    if ip in _rate_limit_store:
+        _rate_limit_store[ip] = [t for t in _rate_limit_store[ip] if t > window_start]
+    else:
+        _rate_limit_store[ip] = []
+    if len(_rate_limit_store[ip]) >= RATE_LIMIT_MAX:
+        return False
+    _rate_limit_store[ip].append(now)
+    return True
+
+
+def _validate_mime(file_bytes: bytes) -> str | None:
+    """Sniff MIME type from magic bytes — not from filename extension."""
+    if file_bytes[:8] == b'\x89PNG\r\n\x1a\n':
+        return "image/png"
+    if file_bytes[:2] in (b'\xff\xd8',):
+        return "image/jpeg"
+    if file_bytes[:4] == b'RIFF' and file_bytes[8:12] == b'WEBP':
+        return "image/webp"
+    if file_bytes[:2] in (b'BM',):
+        return "image/bmp"
+    if file_bytes[:4] in (b'II\x2a\x00', b'MM\x00\x2a'):
+        return "image/tiff"
+    return None
 
 
 def _generate_preview_svg(dxf_path: Path, out_path: Path) -> Path | None:
@@ -55,8 +103,10 @@ def _generate_preview_svg(dxf_path: Path, out_path: Path) -> Path | None:
                 if not pts:
                     continue
                 for p in pts:
-                    minx = min(minx, p[0]); maxx = max(maxx, p[0])
-                    miny = min(miny, p[1]); maxy = max(maxy, p[1])
+                    minx = min(minx, p[0])
+                    maxx = max(maxx, p[0])
+                    miny = min(miny, p[1])
+                    maxy = max(maxy, p[1])
                 d = " ".join(f'{"M" if i==0 else "L"}{p[0]},{ -p[1]}' for i,p in enumerate(pts))
                 if ent.closed:
                     d += " Z"
@@ -64,7 +114,8 @@ def _generate_preview_svg(dxf_path: Path, out_path: Path) -> Path | None:
 
         if not lines_svg:
             return None
-        w = maxx - minx or 100; h = maxy - miny or 100
+        w = maxx - minx or 100
+        h = maxy - miny or 100
         svg_content = f"""<?xml version="1.0" encoding="UTF-8"?>
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="{minx} {-maxy} {w} {h}" width="{w}" height="{h}">
 <rect x="{minx}" y="{-maxy}" width="{w}" height="{h}" fill="#1a1d23"/>
@@ -251,13 +302,37 @@ HTML_TEMPLATE = """
                     </div>
                     <div class="form-group" style="display:flex;align-items:center;gap:0.75rem;margin-top:0.75rem;">
                         <input type="checkbox" id="ai-enhance" name="ai-enhance" style="width:auto;accent-color:#58a6ff;">
-                        <label for="ai-enhance" style="margin:0;cursor:pointer;">✨ AI Enhance (edge-aware denoising + gap closing)</label>
+                        <label for="ai-enhance" style="margin:0;cursor:pointer;">AI Enhance (edge-aware denoising + gap closing)</label>
                     </div>
                     <div class="form-group" style="display:flex;align-items:center;gap:0.75rem;margin-top:0.5rem;">
                         <input type="checkbox" id="deskew-perspective" name="deskew-perspective" checked style="width:auto;accent-color:#58a6ff;">
-                        <label for="deskew-perspective" style="margin:0;cursor:pointer;">📐 Auto-Correct Perspective (Flat/Orthogonal Warp)</label>
+                        <label for="deskew-perspective" style="margin:0;cursor:pointer;">Auto-Correct Perspective (Flat/Orthogonal Warp)</label>
                     </div>
                 </div>
+            </details>
+            
+            <details style="margin:1rem 0;">
+                <summary style="color:#8b949e; cursor:pointer; font-size:0.9rem;">📏 Calibration (Dimensional Accuracy)</summary>
+                <div style="display:grid; grid-template-columns:1fr 1fr 1fr; gap:1rem; margin-top:1rem;">
+                    <div class="form-group">
+                        <label for="cal-px">Reference length (px)</label>
+                        <input type="text" id="cal-px" name="cal-px" placeholder="e.g. 64">
+                    </div>
+                    <div class="form-group">
+                        <label for="cal-real">Real-world length</label>
+                        <input type="text" id="cal-real" name="cal-real" placeholder="e.g. 20">
+                    </div>
+                    <div class="form-group">
+                        <label for="cal-unit">Unit</label>
+                        <select id="cal-unit" name="cal-unit">
+                            <option value="mm">mm</option>
+                            <option value="cm">cm</option>
+                            <option value="in">inches</option>
+                            <option value="px">pixels</option>
+                        </select>
+                    </div>
+                </div>
+                <p style="color:#8b949e; font-size:0.8rem; margin-top:0.25rem;">Measure a known length in your image (e.g. a ruler edge). Enter the pixel distance and its real-world size for accurate CAD output.</p>
             </details>
             
             <button type="submit" class="btn" id="submit-btn" disabled>Convert to DXF</button>
@@ -265,6 +340,40 @@ HTML_TEMPLATE = """
         
         <div id="result" class="result hidden"></div>
         <div id="error" class="error hidden"></div>
+        
+        <div style="margin-top:3rem; border-top:1px solid #30363d; padding-top:2rem;">
+            <h2 style="color:#58a6ff; font-size:1.2rem; margin-bottom:0.5rem;">Batch Convert (ZIP)</h2>
+            <p style="color:#8b949e; font-size:0.85rem; margin-bottom:1rem;">Upload a ZIP archive containing multiple images. Each image will be converted to DXF and packaged in a single download.</p>
+            <form id="batch-form" enctype="multipart/form-data">
+                <div class="upload-area" id="batch-drop-zone">
+                    <div class="upload-icon">📦</div>
+                    <p>Drag & drop ZIP file here or click to browse</p>
+                    <p style="color: #8b949e; font-size: 0.85rem; margin-top: 0.5rem;">ZIP with PNG, JPG, WEBP, BMP, TIFF files (max 50 MB)</p>
+                    <input type="file" id="batch-file-input" name="zipfile" accept=".zip" style="display: none;">
+                </div>
+                <div id="batch-file-list" style="color:#8b949e; font-size:0.85rem; margin-top:0.75rem;"></div>
+                <div style="display:grid; grid-template-columns:1fr 1fr; gap:1rem; margin-top:1rem;">
+                    <div class="form-group">
+                        <label for="batch-engine">Engine</label>
+                        <select id="batch-engine" name="engine">
+                            <option value="classic">Classic (fast, local)</option>
+                            <option value="advanced">Advanced (VTracer AI)</option>
+                        </select>
+                    </div>
+                    <div class="form-group">
+                        <label for="batch-mode">DXF Mode</label>
+                        <select id="batch-mode" name="mode">
+                            <option value="lines">Lines (cut paths)</option>
+                            <option value="hatch">Hatch (engrave fills)</option>
+                            <option value="faces">Faces (closed shapes)</option>
+                        </select>
+                    </div>
+                </div>
+                <button type="submit" class="btn" id="batch-submit-btn" disabled style="margin-top:1rem;">Batch Convert</button>
+            </form>
+            <div id="batch-result" class="result hidden" style="margin-top:1rem;"></div>
+            <div id="batch-error" class="error hidden"></div>
+        </div>
     </div>
     
     <script>
@@ -337,26 +446,41 @@ HTML_TEMPLATE = """
                 const data = await response.json();
                 
                 const s = data.stats || {};
+                const q = data.qa_report || {};
+                const qaHtml = q.entity_count !== undefined ? `
+                    <div class="qa-report" style="margin-top:1.5rem; padding:1rem; background:#0d1117; border-radius:6px; border:1px solid #30363d;">
+                        <h4 style="color:#8b949e; margin-bottom:0.75rem; font-size:0.9rem;">QA Report</h4>
+                        <div class="stats">
+                            <div class="stat"><div class="stat-value">${q.entity_count || 0}</div><div class="stat-label">Entities</div></div>
+                            <div class="stat"><div class="stat-value">${q.closed_path_count || 0}</div><div class="stat-label">Closed</div></div>
+                            <div class="stat"><div class="stat-value">${q.open_path_count || 0}</div><div class="stat-label">Open</div></div>
+                            <div class="stat"><div class="stat-value">${q.total_segments || 0}</div><div class="stat-label">Segments</div></div>
+                        </div>
+                        ${q.open_path_count > 0 ? `<p style="color:#d29922; font-size:0.85rem; margin-top:0.5rem;">⚠ ${q.open_path_count} open path(s) — may affect CNC cutting</p>` : ''}
+                        ${(!q.dxf_audit_pass && q.dxf_audit_pass !== undefined) ? `<p style="color:#f85149; font-size:0.85rem;">✗ DXF audit failed</p>` : ''}
+                    </div>
+                ` : '';
                 resultDiv.innerHTML = `
                     <h3>Conversion Complete</h3>
                     <div class="stats">
                         <div class="stat">
-                            <div class="stat-value">${s.outlines || 0}</div>
-                            <div class="stat-label">Outlines</div>
+                            <div class="stat-value">${s.paths || 0}</div>
+                            <div class="stat-label">Paths</div>
                         </div>
                         <div class="stat">
-                            <div class="stat-value">${s.holes || 0}</div>
-                            <div class="stat-label">Holes</div>
+                            <div class="stat-value">${s.closed || 0}</div>
+                            <div class="stat-label">Closed</div>
                         </div>
                         <div class="stat">
-                            <div class="stat-value">${s.lines || 0}</div>
-                            <div class="stat-label">Lines</div>
+                            <div class="stat-value">${s.open || 0}</div>
+                            <div class="stat-label">Open</div>
                         </div>
                         <div class="stat">
-                            <div class="stat-value">${s.polygons || 0}</div>
-                            <div class="stat-label">Polygons</div>
+                            <div class="stat-value">${s.nodes || s.segments || 0}</div>
+                            <div class="stat-label">Nodes</div>
                         </div>
                     </div>
+                    ${qaHtml}
                     <div style="display:flex; gap:0.75rem; margin-top:1rem;">
                         <a href="/view/${data.filename}" class="download-btn" style="background:#1f6feb;">🔍 View DXF</a>
                         <a href="/download/${data.filename}" class="download-btn">⬇ Download DXF</a>
@@ -372,10 +496,93 @@ HTML_TEMPLATE = """
                 submitBtn.textContent = 'Convert to DXF';
             }
         });
+        // Batch upload
+        const batchDropZone = document.getElementById('batch-drop-zone');
+        const batchFileInput = document.getElementById('batch-file-input');
+        const batchFileList = document.getElementById('batch-file-list');
+        const batchSubmitBtn = document.getElementById('batch-submit-btn');
+        const batchForm = document.getElementById('batch-form');
+        const batchResultDiv = document.getElementById('batch-result');
+        const batchErrorDiv = document.getElementById('batch-error');
+
+        batchDropZone.addEventListener('click', () => batchFileInput.click());
+        batchDropZone.addEventListener('dragover', (e) => { e.preventDefault(); batchDropZone.classList.add('dragover'); });
+        batchDropZone.addEventListener('dragleave', () => batchDropZone.classList.remove('dragover'));
+        batchDropZone.addEventListener('drop', (e) => {
+            e.preventDefault();
+            batchDropZone.classList.remove('dragover');
+            if (e.dataTransfer.files.length) {
+                batchFileInput.files = e.dataTransfer.files;
+                handleBatchFile(e.dataTransfer.files[0]);
+            }
+        });
+        batchFileInput.addEventListener('change', (e) => {
+            if (e.target.files.length) handleBatchFile(e.target.files[0]);
+        });
+
+        function handleBatchFile(file) {
+            batchFileList.textContent = `${file.name} (${(file.size / 1024 / 1024).toFixed(1)} MB)`;
+            batchSubmitBtn.disabled = false;
+        }
+
+        batchForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            batchSubmitBtn.disabled = true;
+            batchSubmitBtn.textContent = 'Converting batch...';
+            batchResultDiv.classList.add('hidden');
+            batchErrorDiv.classList.add('hidden');
+
+            const formData = new FormData(batchForm);
+
+            try {
+                const response = await fetch('/api/batch', {
+                    method: 'POST',
+                    body: formData
+                });
+
+                if (!response.ok) {
+                    const err = await response.json();
+                    throw new Error(err.error || 'Batch conversion failed');
+                }
+
+                const data = await response.json();
+                let filesHtml = '';
+                if (data.files && data.files.length > 0) {
+                    filesHtml = '<div style="margin-top:1rem;">' +
+                        data.files.map(f => `<div style="display:flex;justify-content:space-between;align-items:center;padding:0.5rem 0;border-bottom:1px solid #30363d;">
+                            <span>${f.filename}</span>
+                            <a href="/download/${f.filename}" class="download-btn" style="padding:0.3rem 0.8rem;font-size:0.8rem;">Download</a>
+                        </div>`).join('') + '</div>';
+                }
+                batchResultDiv.innerHTML = `
+                    <h3 style="color:#58a6ff; margin-bottom:0.5rem;">Batch Complete</h3>
+                    <p style="color:#8b949e; font-size:0.85rem;">${data.total || 0} files processed, ${data.success || 0} succeeded, ${data.failed || 0} failed</p>
+                    ${data.errors && data.errors.length > 0 ? '<div style="color:#d29922;font-size:0.85rem;margin-top:0.5rem;">' + data.errors.map(e => '<div>- ' + e + '</div>').join('') + '</div>' : ''}
+                    ${filesHtml}
+                `;
+                batchResultDiv.classList.remove('hidden');
+            } catch (err) {
+                batchErrorDiv.textContent = err.message;
+                batchErrorDiv.classList.remove('hidden');
+            } finally {
+                batchSubmitBtn.disabled = false;
+                batchSubmitBtn.textContent = 'Batch Convert';
+            }
+        });
     </script>
 </body>
 </html>
 """
+
+@app.after_request
+def add_security_headers(response):
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    response.headers["X-Frame-Options"] = "DENY"
+    response.headers["X-XSS-Protection"] = "1; mode=block"
+    response.headers["Content-Security-Policy"] = "default-src 'self'; img-src 'self' data: blob:; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'"
+    response.headers["Strict-Transport-Security"] = "max-age=31536000; includeSubDomains"
+    return response
+
 
 @app.route("/")
 def index():
@@ -447,12 +654,20 @@ def _parse_scale(scale_str: str) -> float | None:
 
 @app.route("/convert", methods=["POST"])
 def convert():
+    client_ip = request.remote_addr or "127.0.0.1"
+    if not _check_rate_limit(client_ip):
+        return jsonify({"error": "Rate limit exceeded. Max 30 requests per minute."}), 429
+
     if "image" not in request.files:
         return jsonify({"error": "No image uploaded"}), 400
 
     file = request.files["image"]
-    if not file.filename:
+    if not file or not file.filename:
         return jsonify({"error": "No file selected"}), 400
+
+    file_size = request.content_length or 0
+    if file_size > 25 * 1024 * 1024:
+        return jsonify({"error": "File too large. Maximum size is 25 MB."}), 413
 
     _cleanup_old_downloads()
     DOWNLOAD_DIR.mkdir(exist_ok=True)
@@ -469,9 +684,13 @@ def convert():
     ai_enhance = request.form.get("ai-enhance") == "on"
     deskew_perspective = request.form.get("deskew-perspective") == "on"
 
+    # Calibration fields (P0 - PRD §3.1)
+    cal_px = request.form.get("cal-px", "").strip()
+    cal_real = request.form.get("cal-real", "").strip()
+    cal_unit = request.form.get("cal-unit", "mm").strip()
+
     try:
         import cv2
-        import numpy as np
     except ImportError:
         return jsonify({"error": "Server misconfigured: OpenCV not available"}), 500
 
@@ -485,9 +704,22 @@ def convert():
         input_path = Path(tmpdir) / orig_filename
         file.save(str(input_path))
 
+        file_bytes = input_path.read_bytes()
+        if len(file_bytes) > 25 * 1024 * 1024:
+            return jsonify({"error": "File too large. Maximum size is 25 MB."}), 413
+
+        sniffed_mime = _validate_mime(file_bytes)
+        if sniffed_mime is None:
+            return jsonify({"error": "Unsupported file type. Only PNG, JPG, WEBP, BMP, TIFF allowed."}), 400
+
         img = cv2.imread(str(input_path))
         if img is None:
             return jsonify({"error": "Cannot load image — unsupported format"}), 400
+
+        # Guard against decompression bombs (Pillow/OpenCV CVE)
+        h, w = img.shape[:2]
+        if h * w > 40 * 1024 * 1024:
+            return jsonify({"error": "Image too large. Maximum resolution is 40 MP."}), 413
 
         # Optional Perspective Deskewing
         if deskew_perspective:
@@ -495,7 +727,6 @@ def convert():
             img = _deskew_p(img)
             cv2.imwrite(str(input_path), img)
 
-        h, w = img.shape[:2]
         max_dim = max(h, w)
         if max_dim > MAX_IMAGE_DIM:
             scale_px = MAX_IMAGE_DIM / max_dim
@@ -520,13 +751,29 @@ def convert():
         min_area = int(min_area_str) if min_area_str.isdigit() else 100
         output_dir = Path(tmpdir) / "output"
 
-        # Build config
+        # Build calibration (P0)
+        calibration = None
+        if cal_px and cal_real:
+            try:
+                cal_px_f = float(cal_px)
+                cal_real_f = float(cal_real)
+                if cal_px_f > 0 and cal_real_f > 0:
+                    calibration = {
+                        "reference_px_length": cal_px_f,
+                        "real_world_length": cal_real_f,
+                        "unit": cal_unit if cal_unit in ("mm", "cm", "in", "px") else "mm",
+                    }
+            except (ValueError, TypeError):
+                calibration = None
+
         cfg = {
             "dxf_mode": mode,
             "cnc_layers": True,
         }
         if scale_factor is not None:
             cfg["scale_factor"] = scale_factor
+        if calibration:
+            cfg["calibration"] = calibration
         if min_area != 100:
             cfg["min_area"] = min_area
         if smoothing:
@@ -565,48 +812,75 @@ def convert():
         except Exception:
             orig_preview_path = None
 
-        # Select and run engine
-        try:
-            if engine.startswith("cloud:"):
-                provider_name = engine.split(":", 1)[1]
-                from .cloud_providers import get_cloud_provider
-                provider = get_cloud_provider(provider_name)
-                if provider is None or not provider.is_available():
-                    return jsonify({"error": f"Cloud provider '{provider_name}' not configured"}), 400
-                if preset:
-                    from .engines import apply_preset
-                    cfg = apply_preset(cfg, preset)
-                result = provider.convert(input_path, output_dir, cfg)
-            elif engine == "advanced":
-                from .engines import AdvancedEngine, apply_preset
-                eng = AdvancedEngine()
-                if preset:
-                    cfg = apply_preset(cfg, preset)
-                result = eng.convert(input_path, output_dir, cfg)
-            else:
-                from .engines import ClassicEngine, apply_preset
-                eng = ClassicEngine()
-                if preset:
-                    cfg = apply_preset(cfg, preset)
-                result = eng.convert(input_path, output_dir, cfg)
-        except Exception as e:
-            return jsonify({"error": f"Vectorization error: {e}"}), 500
+        # Select and run engine (with graceful degradation — PRD §8.3)
+        result = None
+        last_error = None
+        engines_to_try = []
+
+        if engine.startswith("cloud:"):
+            provider_name = engine.split(":", 1)[1]
+            from .cloud_providers import get_cloud_provider
+            provider = get_cloud_provider(provider_name)
+            if provider is None or not provider.is_available():
+                return jsonify({"error": f"Cloud provider '{provider_name}' not configured"}), 400
+            engines_to_try.append(("cloud", provider, cfg))
+        elif engine == "advanced":
+            from .engines import AdvancedEngine, apply_preset
+            eng = AdvancedEngine()
+            if preset:
+                cfg = apply_preset(cfg, preset)
+            engines_to_try.append(("advanced", eng, cfg))
+        else:
+            from .engines import ClassicEngine, apply_preset
+            eng = ClassicEngine()
+            if preset:
+                cfg = apply_preset(cfg, preset)
+            engines_to_try.append(("classic", eng, cfg))
+
+        for eng_name, eng_instance, eng_cfg in engines_to_try:
+            try:
+                result = eng_instance.convert(input_path, output_dir, eng_cfg)
+                logger.info("Conversion success: engine=%s file=%s", eng_name, orig_filename)
+                break
+            except Exception as e:
+                last_error = e
+                logger.warning("Engine %s failed for %s: %s", eng_name, orig_filename, e)
+                # Graceful degradation: fall back to Classic
+                if eng_name == "advanced":
+                    from .engines import ClassicEngine
+                    fallback_cfg = dict(eng_cfg)
+                    if preset:
+                        from .engines import apply_preset
+                        fallback_cfg = apply_preset(fallback_cfg, preset)
+                    classic = ClassicEngine()
+                    try:
+                        result = classic.convert(input_path, output_dir, fallback_cfg)
+                        logger.info("Fallback to Classic successful for %s", orig_filename)
+                        break
+                    except Exception as e2:
+                        last_error = e2
+                        logger.error("Classic fallback also failed for %s: %s", orig_filename, e2)
+
+        if result is None:
+            return jsonify({"error": f"Vectorization error: {last_error}"}), 500
 
         dxf_path = Path(result["dxf"])
         if not dxf_path.exists():
             return jsonify({"error": "DXF generation failed"}), 500
 
-        # Generate SVG alongside DXF for multi-format bundle
+        # Generate SVG preview alongside DXF
         svg_path = _generate_preview_svg(dxf_path, output_dir / "preview.svg")
-        # Generate PNG preview from the DXF using ezdxf
         png_preview_path = _generate_png_preview(dxf_path, img, output_dir / "preview.png")
 
         zip_path = Path(tmpdir) / "result.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.write(dxf_path, dxf_path.name)
-            review_src = Path(result["review"])
+            review_src = Path(result.get("review", ""))
             if review_src.exists():
                 zf.write(review_src, "review.md")
+            qa_json = output_dir / "qa_report.json"
+            if qa_json.exists():
+                zf.write(qa_json, "qa_report.json")
             if svg_path and svg_path.exists():
                 zf.write(svg_path, f"{original_stem}.svg")
             if png_preview_path and png_preview_path.exists():
@@ -617,16 +891,140 @@ def convert():
         final_zip = DOWNLOAD_DIR / f"{original_stem}.zip"
         final_zip.write_bytes(zip_path.read_bytes())
 
-    return jsonify({
+    qa_data = result.get("qa_report", {})
+    response_data = {
         "filename": final_zip.name,
         "stats": result.get("stats", result.get("geometry", {})),
+        "qa_report": qa_data,
         "has_svg": bool(svg_path and svg_path.exists()),
         "has_preview": bool(orig_preview_path and orig_preview_path.exists()),
-    })
+    }
+
+    # Gate on critical QA issues (PRD §3.4, §1.4)
+    if qa_data.get("has_critical_issues", False) or (
+        qa_data.get("dxf_audit_pass") is False
+    ):
+        response_data["warning"] = (
+            "DXF has critical issues (open paths or audit failure). "
+            "Review QA report before using in CAD/CAM."
+        )
+
+    return jsonify(response_data)
 
 @app.route("/favicon.ico")
 def favicon():
     return "", 204
+
+@app.route("/api/batch", methods=["POST"])
+def batch_convert():
+    """Batch convert multiple images from a ZIP archive."""
+    client_ip = request.remote_addr or "127.0.0.1"
+    if not _check_rate_limit(client_ip):
+        return jsonify({"error": "Rate limit exceeded. Max 30 requests per minute."}), 429
+
+    if "zipfile" not in request.files:
+        return jsonify({"error": "No ZIP file uploaded"}), 400
+
+    file = request.files["zipfile"]
+    if not file or not file.filename:
+        return jsonify({"error": "No file selected"}), 400
+
+    if not file.filename.lower().endswith(".zip"):
+        return jsonify({"error": "File must be a ZIP archive"}), 400
+
+    file_size = request.content_length or 0
+    if file_size > 50 * 1024 * 1024:
+        return jsonify({"error": "ZIP too large. Maximum size is 50 MB."}), 413
+
+    _cleanup_old_downloads()
+    DOWNLOAD_DIR.mkdir(exist_ok=True)
+
+    engine = request.form.get("engine", "classic")
+    mode = request.form.get("mode", "lines")
+
+    with tempfile.TemporaryDirectory() as tmpdir:
+        zip_path = Path(tmpdir) / "upload.zip"
+        file.save(str(zip_path))
+
+        try:
+            with zipfile.ZipFile(zip_path, "r") as zf:
+                zf.extractall(tmpdir)
+        except zipfile.BadZipFile:
+            return jsonify({"error": "Invalid ZIP file"}), 400
+
+        image_files = []
+        for ext in ("*.png", "*.jpg", "*.jpeg", "*.webp", "*.bmp", "*.tiff", "*.tif"):
+            image_files.extend(Path(tmpdir).rglob(ext))
+
+        if not image_files:
+            return jsonify({"error": "No supported images found in ZIP"}), 400
+
+        if len(image_files) > 20:
+            return jsonify({"error": "Too many images. Maximum 20 per batch."}), 400
+
+        results = []
+        errors = []
+        output_dir = Path(tmpdir) / "output"
+        output_dir.mkdir(exist_ok=True)
+
+        for img_path in image_files:
+            try:
+                img = cv2.imread(str(img_path))
+                if img is None:
+                    errors.append(f"{img_path.name}: unsupported format")
+                    continue
+
+                h, w = img.shape[:2]
+                if h * w > 40 * 1024 * 1024:
+                    errors.append(f"{img_path.name}: image too large (>40 MP)")
+                    continue
+
+                max_dim = max(h, w)
+                if max_dim > MAX_IMAGE_DIM:
+                    scale_px = MAX_IMAGE_DIM / max_dim
+                    new_w, new_h = int(w * scale_px), int(h * scale_px)
+                    img = cv2.resize(img, (new_w, new_h), interpolation=cv2.INTER_AREA)
+
+                file_output = output_dir / img_path.stem
+                file_output.mkdir(exist_ok=True)
+
+                cfg = {"dxf_mode": mode, "cnc_layers": True}
+
+                if engine == "advanced":
+                    from .engines import AdvancedEngine
+                    eng = AdvancedEngine()
+                else:
+                    from .engines import ClassicEngine
+                    eng = ClassicEngine()
+
+                result = eng.convert(str(img_path), file_output, cfg)
+                results.append({
+                    "original": img_path.name,
+                    "filename": f"{img_path.stem}.zip",
+                    "dxf": result.get("dxf"),
+                })
+
+                batch_zip_path = Path(tmpdir) / f"{img_path.stem}.zip"
+                with zipfile.ZipFile(batch_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                    zf.write(result["dxf"], f"{img_path.stem}.dxf")
+                    qa_json = file_output / "qa_report.json"
+                    if qa_json.exists():
+                        zf.write(qa_json, "qa_report.json")
+
+                final_batch_zip = DOWNLOAD_DIR / f"{img_path.stem}.zip"
+                final_batch_zip.write_bytes(batch_zip_path.read_bytes())
+
+            except Exception as e:
+                errors.append(f"{img_path.name}: {str(e)}")
+                logger.warning("Batch conversion failed for %s: %s", img_path.name, e)
+
+    return jsonify({
+        "total": len(image_files),
+        "success": len(results),
+        "failed": len(errors),
+        "files": [{"filename": r["filename"]} for r in results],
+        "errors": errors,
+    })
 
 @app.route("/download/<filename>")
 def download(filename):
@@ -723,7 +1121,8 @@ def _dxf_to_json(dxf_path: Path) -> dict:
     for ent in msp:
         try:
             for x, y in _entity_xy(ent):
-                xs.append(x); ys.append(y)
+                xs.append(x)
+                ys.append(y)
         except Exception:
             pass
     bbox = None
@@ -820,7 +1219,6 @@ def dxf_json(name):
                 dxf_names = [n for n in zf.namelist() if n.endswith(".dxf")]
                 if not dxf_names:
                     return jsonify({"error": "No DXF in archive"}), 400
-                import io, os as _os
                 tmp = Path(tempfile.mkdtemp())
                 zf.extractall(tmp)
                 dxf_path = tmp / dxf_names[0]
@@ -1303,7 +1701,8 @@ def svg_download(filename):
 @app.route("/api/pdf", methods=["POST"])
 def generate_pdf():
     """Convert a canvas PNG data URL to a downloadable PDF using Pillow."""
-    import base64, io
+    import base64
+    import io
     from PIL import Image
     data = request.get_json()
     if not data or "image" not in data:

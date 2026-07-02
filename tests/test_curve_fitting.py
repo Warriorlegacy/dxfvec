@@ -19,7 +19,6 @@ from dxfvec.path_model import (
     Path,
     PathModel,
     Vec2,
-    LineSegment,
     polyline_to_path,
 )
 

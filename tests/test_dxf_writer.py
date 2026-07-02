@@ -17,7 +17,6 @@ from dxfvec.path_model import (
     circle_to_path,
     Path as DxfPath,
     ArcSegment,
-    Vec2,
 )
 from dxfvec.dxf_writer import write_dxf, write_svg, LAYER_COLORS
 

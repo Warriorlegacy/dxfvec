@@ -17,20 +17,17 @@ Changes vs v1:
 """
 from __future__ import annotations
 
+import logging
 from abc import ABC, abstractmethod
 from pathlib import Path
 from typing import Any
 
 import cv2
-import numpy as np
 
 from .dxf_writer import write_dxf, write_svg
 from .vectorizer import (
     Vectorizer,
-    ImageModifier,
-    ShapeDetector,
 )
-from .preprocess import preprocess
 from .path_model import (
     Calibration,
     DXFMode,
@@ -41,8 +38,10 @@ from .path_model import (
     polyline_to_path,
     circle_to_path,
 )
-from .qa_report import generate_qa_report, save_qa_report
+from .qa_report import generate_qa_report
 from .curve_fitting import detect_and_replace_arcs, douglas_peucker
+
+logger = logging.getLogger("dxfvec.engines")
 
 
 # ── Presets ──────────────────────────────────────────────────────────────────
@@ -140,6 +139,8 @@ class ClassicEngine(BaseEngine):
         cfg = config or {}
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+
+        logger.info("ClassicEngine: converting %s", image_path)
 
         # Extract config with defaults
         scale_factor = cfg.get("scale_factor")
@@ -279,6 +280,8 @@ class AdvancedEngine(BaseEngine):
         cfg = config or {}
         output_dir = Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
+
+        logger.info("AdvancedEngine: converting %s", image_path)
 
         vcfg = self._default_config()
         vcfg.update({k: v for k, v in cfg.items() if k in self._default_config()})
@@ -447,7 +450,6 @@ class AdvancedEngine(BaseEngine):
         tolerance_mm: float = 0.15,
     ) -> PathModel:
         import xml.etree.ElementTree as ET
-        import re
 
         model = PathModel(
             trace_mode=TraceMode(trace_mode_str) if trace_mode_str in ("outline", "centerline") else TraceMode.OUTLINE,
@@ -460,7 +462,6 @@ class AdvancedEngine(BaseEngine):
 
         svg_content = svg_path.read_text(encoding="utf-8")
         root = ET.fromstring(svg_content)
-        ns = {"svg": "http://www.w3.org/2000/svg"}
 
         paths = root.findall(".//{http://www.w3.org/2000/svg}path")
         if not paths:
@@ -578,8 +579,8 @@ class AdvancedEngine(BaseEngine):
             f"| DXF audit | {'PASS' if qa.dxf_audit_pass else 'FAIL'} |",
             "\n## Layers\n",
         ]
-        for l in qa.layers:
-            lines.append(f"- {l.name} ({l.color_aci}): {l.entity_count} entities")
+        for layer in qa.layers:
+            lines.append(f"- {layer.name} ({layer.color_aci}): {layer.entity_count} entities")
         if qa.warnings:
             lines.append("\n## Warnings\n")
             for w in qa.warnings:

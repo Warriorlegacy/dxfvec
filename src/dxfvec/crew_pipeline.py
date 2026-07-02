@@ -10,7 +10,6 @@ Any vision-capable LLM works as the backend (provider arg → LiteLLM model stri
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 

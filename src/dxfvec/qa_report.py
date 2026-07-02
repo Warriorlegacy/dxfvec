@@ -15,7 +15,6 @@ presented to the user (PRD §3.4, P0).
 from __future__ import annotations
 
 import json
-import math
 from dataclasses import dataclass, field, asdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -83,8 +82,8 @@ class QAReport:
             f"**Unit:** {self.calibration_unit}",
             "",
             "## Summary",
-            f"| Metric | Value |",
-            f"|---|---|",
+            "| Metric | Value |",
+            "|---|---|",
             f"| Entities | {self.entity_count} |",
             f"| Closed paths | {self.closed_path_count} |",
             f"| Open paths | {self.open_path_count} |",
@@ -128,8 +127,8 @@ class QAReport:
             lines.append("## Layers")
             lines.append("| Layer | Entities | ACI Color |")
             lines.append("|---|---|---|")
-            for l in self.layers:
-                lines.append(f"| {l.name} | {l.entity_count} | {l.color_aci} |")
+            for layer in self.layers:
+                lines.append(f"| {layer.name} | {layer.entity_count} | {layer.color_aci} |")
 
         if self.dxf_audit_errors:
             lines.append("")

@@ -9,15 +9,15 @@ Providers are disabled by default and surfaced only when keys are configured.
 """
 from __future__ import annotations
 
-import base64
 import os
-from abc import ABC, abstractmethod
+from abc import abstractmethod
 from pathlib import Path
 from typing import Any
 
 import requests
 
-from .dxf_writer import create_dxf
+from .dxf_writer import write_dxf
+from .qa_report import LayerInfo, generate_qa_report
 
 
 # ── Environment variable key names ────────────────────────────────────────────
@@ -98,7 +98,7 @@ class CloudProviderBase:
         engine_name: str,
         scale_factor: float | None = None,
     ) -> dict[str, Any]:
-        """Common helper: save SVG, parse to geometry, write DXF."""
+        """Common helper: save SVG, parse to geometry, write DXF via canonical PathModel."""
         dxf_path = output_dir / "drawing.dxf"
         review_path = output_dir / "review.md"
 
@@ -109,37 +109,68 @@ class CloudProviderBase:
         else:
             svg_path.write_text(svg_content, encoding="utf-8")
 
-        # Parse SVG → geometry
-        from .engines import _svg_to_geometry
-        geometry = _svg_to_geometry(svg_path, scale_factor)
+        # Parse SVG --> PathModel via AdvancedEngine helper
+        from .engines import AdvancedEngine
+        model = AdvancedEngine()._svg_to_pathmodel(
+            svg_path, scale_factor, None, dxf_mode, "R2010", "outline", tolerance_mm=0.15
+        )
 
-        # Create DXF
-        create_dxf(geometry, dxf_path)
+        # Write DXF via canonical writer
+        write_dxf(
+            model=model,
+            output_path=dxf_path,
+            dxf_version=model.dxf_version,
+            units="mm",
+            enforce_closed_cut=True,
+            max_gap_close=3.0,
+        )
+
+        # Generate QA report
+        qa_report = generate_qa_report(model, dxf_path=dxf_path)
+        qa_json_path = output_dir / "qa_report.json"
+        qa_json_path.write_text(qa_report.to_json(), encoding="utf-8")
+        qa_md_path = output_dir / "qa_report.md"
+        qa_md_path.write_text(qa_report.to_markdown(), encoding="utf-8")
 
         # Write review
         lines = [
             f"# DXF Vectorization Review — {Path(output_dir).name}",
             f"\n**Engine:** {engine_name}  |  **Provider:** {self.display_name}",
-            "\n## Geometry extracted\n",
-            "| Entity  | Count | Layer |",
-            "|---------|-------|-------|",
-            f"| Outlines| {len(geometry.get('outlines', [])):>5} | CUT   |",
-            f"| Holes   | {len(geometry.get('holes', [])):>5} | CUT   |",
-            f"| Polygons| {len(geometry.get('polygons', [])):>5} | ENGRAVE |",
-            "\n## Provider info\n",
-            f"- **{self.display_name}**: cloud API (BYOK)",
-            f"- API key configured: {'yes' if self.is_available() else 'no'}",
-            "- DXF layers: CUT / ENGRAVE",
+            "\n## QA Summary\n",
+            "| Metric | Value |",
+            "|---|---|",
+            f"| Entities | {qa_report.entity_count} |",
+            f"| Closed | {qa_report.closed_path_count} |",
+            f"| Open | {qa_report.open_path_count} |",
+            f"| Self-intersections | {len(qa_report.self_intersections)} |",
+            f"| DXF audit | {'PASS' if qa_report.dxf_audit_pass else 'FAIL'} |",
+            "\n## Layers\n",
         ]
+        for layer in qa_report.layers:
+            lines.append(f"- {layer.name} ({layer.color_aci}): {layer.entity_count} entities")
+        if qa_report.warnings:
+            lines.append("\n## Warnings\n")
+            for w in qa_report.warnings:
+                lines.append(f"- ⚠ {w}")
         review_path.write_text("\n".join(lines), encoding="utf-8")
 
         return {
             "dxf": str(dxf_path),
+            "svg": str(svg_path),
+            "qa_report": qa_report.to_dict(),
+            "qa_report_paths": {"json": str(qa_json_path), "md": str(qa_md_path)},
             "review": str(review_path),
-            "geometry": geometry,
             "engine": engine_name,
             "dxf_mode": dxf_mode,
             "provider": self.provider_name,
+            "stats": {
+                "paths": qa_report.entity_count,
+                "closed": qa_report.closed_path_count,
+                "open": qa_report.open_path_count,
+                "segments": qa_report.total_segments,
+                "nodes": qa_report.node_count,
+                "layers": len(qa_report.layers),
+            },
         }
 
     def _save_dxf_directly(
@@ -150,33 +181,64 @@ class CloudProviderBase:
         engine_name: str,
         scale_factor: float | None = None,
     ) -> dict[str, Any]:
-        """Save DXF directly, parse its entities to estimate geometry count, and write review."""
+        """Save DXF directly, parse its entities for QA, and write review."""
         dxf_path = output_dir / "drawing.dxf"
         dxf_path.write_bytes(dxf_content)
         review_path = output_dir / "review.md"
 
-        outlines_count = 0
-        holes_count = 0
-        polygons_count = 0
-        lines_count = 0
-        geometry = {"outlines": [], "holes": [], "bend_lines": [], "dimensions": []}
-
+        qa_report = None
         try:
             import ezdxf
+            from .qa_report import QAReport
             doc = ezdxf.readfile(str(dxf_path))
             msp = doc.modelspace()
+            outlines_count = 0
+            holes_count = 0
+            polygons_count = 0
+            lines_count = 0
+            layers: dict[str, int] = {}
             for ent in msp:
                 t = ent.dxftype()
+                layer = ent.dxf.get("layer", "0")
+                layers[layer] = layers.get(layer, 0) + 1
                 if t == "LWPOLYLINE":
                     outlines_count += 1
                 elif t == "CIRCLE":
                     holes_count += 1
                 elif t == "LINE":
                     lines_count += 1
-                elif t in ("POLYLINE", "SOLID"):
+                elif t in ("POLYLINE", "SOLID", "TRACE"):
                     polygons_count += 1
-        except Exception:
-            pass
+
+            # Build a minimal QA report from parsed DXF entities
+            qa_report = QAReport(
+                entity_count=sum(layers.values()),
+                closed_path_count=outlines_count + holes_count,
+                open_path_count=lines_count,
+                layers=[
+                    LayerInfo(name=ln, entity_count=ec, color_aci=7)
+                    for ln, ec in layers.items()
+                ],
+            )
+            # Run ezdxf audit
+            auditor = doc.audit()
+            critical_errors = [
+                e for e in auditor.errors
+                if getattr(e, "severity", 0) >= 50
+            ]
+            qa_report.dxf_audit_pass = len(critical_errors) == 0
+            qa_report.dxf_audit_errors = [str(e) for e in auditor.errors]
+            qa_json_path = output_dir / "qa_report.json"
+            qa_json_path.write_text(qa_report.to_json(), encoding="utf-8")
+            qa_md_path = output_dir / "qa_report.md"
+            qa_md_path.write_text(qa_report.to_markdown(), encoding="utf-8")
+        except Exception as exc:
+            qa_report = QAReport(
+                entity_count=0,
+                dxf_audit_pass=False,
+                dxf_audit_errors=[f"DXF parse error: {exc}"],
+                warnings=["Could not parse cloud provider DXF for full QA."],
+            )
 
         # Write review
         lines = [
@@ -198,8 +260,13 @@ class CloudProviderBase:
 
         return {
             "dxf": str(dxf_path),
+            "svg": str(output_dir / "cloud_output.svg") if (output_dir / "cloud_output.svg").exists() else "",
+            "qa_report": qa_report.to_dict() if qa_report else {},
+            "qa_report_paths": {
+                "json": str(output_dir / "qa_report.json"),
+                "md": str(output_dir / "qa_report.md"),
+            } if qa_report else {},
             "review": str(review_path),
-            "geometry": geometry,
             "engine": engine_name,
             "dxf_mode": dxf_mode,
             "provider": self.provider_name,
@@ -208,7 +275,8 @@ class CloudProviderBase:
                 "holes": holes_count,
                 "lines": lines_count,
                 "polygons": polygons_count,
-            }
+                "layers": len(layers),
+            },
         }
 
 

@@ -143,9 +143,9 @@ def _display_qa(qa: dict) -> None:
     layers = qa.get("layers", [])
     if layers:
         click.echo("")
-        for l in layers:
-            c = f"C{l['color_aci']}" if l.get("color_aci") else "-"
-            click.echo(f"  Layer '{l['name']}': {l['entity_count']} entities (ACI {c})")
+        for layer in layers:
+            c = f"C{layer['color_aci']}" if layer.get("color_aci") else "-"
+            click.echo(f"  Layer '{layer['name']}': {layer['entity_count']} entities (ACI {c})")
 
     bb = qa.get("bounding_box", {})
     if bb:

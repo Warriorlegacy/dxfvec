@@ -10,7 +10,6 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from dxfvec.path_model import (
     Calibration,
     PathModel,
-    Vec2,
     polyline_to_path,
     circle_to_path,
 )

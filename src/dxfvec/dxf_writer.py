@@ -14,17 +14,16 @@ PDF output is guaranteed consistent.
 
 from __future__ import annotations
 
+import logging
 import math
 import os
 from pathlib import Path as _Path
-from typing import Any
 
 import ezdxf
 
 from .path_model import (
     ArcSegment,
     BezierSegment,
-    Calibration,
     DXFVersion,
     LineSegment,
     LAYER_COLORS,
@@ -32,6 +31,8 @@ from .path_model import (
     Path as DxfPath,
     PathModel,
 )
+
+logger = logging.getLogger("dxfvec.dxf_writer")
 
 INSUNITS_MAP: dict[str, int] = {
     "mm": 4,
@@ -70,6 +71,9 @@ def write_dxf(
     """
     output_path = _Path(output_path)
     os.makedirs(str(output_path.parent), exist_ok=True)
+
+    logger.info("Writing DXF: %s (version=%s, units=%s, paths=%d)",
+                output_path, dxf_version.value, units, model.entity_count())
 
     ver_str = DXF_VERSION_MAP.get(dxf_version, "R2010")
     doc = ezdxf.new(dxfversion=ver_str)
@@ -364,7 +368,7 @@ def create_dxf(
 
     Converts the legacy geometry dict to a PathModel.
     """
-    from .path_model import PathModel as _PathModel, polyline_to_path, circle_to_path, Calibration as _Calibration
+    from .path_model import PathModel as _PathModel, polyline_to_path, circle_to_path, DXFMode
 
     model = _PathModel(
         dxf_mode=DXFMode(dxf_mode) if dxf_mode in ("lines", "hatch", "faces") else DXFMode.LINES,

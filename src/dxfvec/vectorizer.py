@@ -10,28 +10,29 @@ Integrates QA report generation and tolerance-based node reduction (PRD §3.3 P0
 from __future__ import annotations
 
 import json
+import logging
 import math
 import pathlib
 from typing import Any, Tuple
 
 import cv2
 import numpy as np
+from skimage import morphology
 
 from .path_model import (
-    ArcSegment,
     Calibration,
     DXFMode,
     DXFVersion,
-    LineSegment,
-    Path as DxfPath,
     PathModel,
     TraceMode,
     Vec2,
     circle_to_path,
     polyline_to_path,
 )
-from .qa_report import generate_qa_report, QAReport
+from .qa_report import generate_qa_report
 from .curve_fitting import detect_and_replace_arcs, douglas_peucker
+
+logger = logging.getLogger("dxfvec.vectorizer")
 
 
 # ── helpers ──────────────────────────────────────────────────────────────────
@@ -46,10 +47,10 @@ def _resize_max_dim(img: np.ndarray, max_dim: int = 2048) -> np.ndarray:
 
 def _enhance(img: np.ndarray, clip: float = 2.0) -> np.ndarray:
     lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-    l, a, b = cv2.split(lab)
+    lum, a, b = cv2.split(lab)
     clahe = cv2.createCLAHE(clipLimit=clip, tileGridSize=(8, 8))
-    l = clahe.apply(l)
-    return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+    lum = clahe.apply(lum)
+    return cv2.cvtColor(cv2.merge([lum, a, b]), cv2.COLOR_LAB2BGR)
 
 
 def _denoise(img: np.ndarray, h: float = 5.0) -> np.ndarray:
@@ -200,10 +201,10 @@ class ImageModifier:
     @staticmethod
     def enhance_contrast(img: np.ndarray, clip_limit: float = 2.0) -> np.ndarray:
         lab = cv2.cvtColor(img, cv2.COLOR_BGR2LAB)
-        l, a, b = cv2.split(lab)
+        lum, a, b = cv2.split(lab)
         clahe = cv2.createCLAHE(clipLimit=clip_limit, tileGridSize=(8, 8))
-        l = clahe.apply(l)
-        return cv2.cvtColor(cv2.merge([l, a, b]), cv2.COLOR_LAB2BGR)
+        lum = clahe.apply(lum)
+        return cv2.cvtColor(cv2.merge([lum, a, b]), cv2.COLOR_LAB2BGR)
 
     @staticmethod
     def denoise(img: np.ndarray, strength: int = 5) -> np.ndarray:
@@ -442,6 +443,9 @@ class Vectorizer:
         output_dir = pathlib.Path(output_dir)
         output_dir.mkdir(parents=True, exist_ok=True)
 
+        logger.info("Vectorizing: %s (mode=%s, trace=%s, arcs=%s)",
+                     image_path, dxf_mode, trace_mode, detect_arcs)
+
         processed, binary = self.preprocess(image_path, output_dir)
         is_drawing = (self._mode == "drawing")
 
@@ -463,6 +467,13 @@ class Vectorizer:
 
         raw_lines = detector.detect_lines(binary)
         lines = self._dedupe_lines(raw_lines, outlines, binary.shape)
+
+        # Centerline tracing: skeletonize binary → extract medial axis paths
+        if trace_mode == "centerline":
+            centerline_model = self._centerline_trace(binary, image_path, scale_factor, calibration,
+                                                      tolerance_mm, detect_arcs, dxf_mode, dxf_version)
+            centerline_model.source_image = str(pathlib.Path(image_path).name)
+            return self._finalize_model(centerline_model, output_dir, scale_factor, calibration)
 
         # Build canonical PathModel
         model = PathModel(
@@ -498,8 +509,8 @@ class Vectorizer:
             ))
 
         # Add detected lines → CUT layer
-        for l in lines:
-            pts = l["points"]
+        for line_item in lines:
+            pts = line_item["points"]
             if len(pts) >= 2:
                 model.add_path(polyline_to_path(
                     pts, closed=False, layer="CUT",
@@ -598,6 +609,88 @@ class Vectorizer:
             },
         }
 
+    def _centerline_trace(
+        self, binary: np.ndarray, image_path: str | pathlib.Path,
+        scale_factor: float | None, calibration: Calibration | None,
+        tolerance_mm: float, detect_arcs: bool, dxf_mode: str, dxf_version: str
+    ) -> PathModel:
+        """Centerline tracing via skeletonization — for line-art, hand sketches, single-stroke engraving."""
+        if binary.dtype != np.uint8:
+            binary = binary.astype(np.uint8)
+        binary_bw = cv2.threshold(binary, 127, 1, cv2.THRESH_BINARY)[1]
+        skeleton = morphology.skeletonize(binary_bw.astype(bool)).astype(np.uint8) * 255
+
+        model = PathModel(
+            trace_mode=TraceMode.CENTERLINE,
+            dxf_mode=DXFMode(dxf_mode) if dxf_mode in ("lines", "hatch", "faces") else DXFMode.LINES,
+            dxf_version=DXFVersion(dxf_version) if dxf_version in ("R12", "R2010", "R2018") else DXFVersion.R2010,
+        )
+        if calibration and calibration.is_valid:
+            model.calibration = calibration
+
+        contours, _ = cv2.findContours(skeleton, cv2.RETR_LIST, cv2.CHAIN_APPROX_NONE)
+        for c in contours:
+            if len(c) < 4:
+                continue
+            pts = c.reshape(-1, 2).tolist()
+            if tolerance_mm > 0:
+                simplified = douglas_peucker(
+                    [Vec2(p[0], p[1]) for p in pts],
+                    epsilon=tolerance_mm, closed=False,
+                )
+                pts = [(p.x, p.y) for p in simplified]
+            if len(pts) >= 2:
+                model.add_path(polyline_to_path(pts, closed=False, layer="CUT"))
+
+        if detect_arcs and model.paths:
+            detect_and_replace_arcs(model, max_deviation=tolerance_mm)
+
+        return model
+
+    def _finalize_model(
+        self, model: PathModel, output_dir: pathlib.Path,
+        scale_factor: float | None, calibration: Calibration | None
+    ) -> dict:
+        """Run scale, write DXF/SVG, generate QA report, return result dict."""
+        if scale_factor is not None and scale_factor != 1.0:
+            model.scale(scale_factor)
+        elif calibration and calibration.is_valid:
+            model.scale(calibration.scale_factor)
+
+        from .dxf_writer import write_dxf
+        dxf_path = output_dir / "drawing.dxf"
+        svg_path = output_dir / "output.svg"
+
+        write_dxf(model=model, output_path=dxf_path, dxf_version=model.dxf_version,
+                  units=calibration.unit if calibration else "mm",
+                  enforce_closed_cut=True, max_gap_close=3.0)
+
+        from .dxf_writer import write_svg
+        write_svg(model, svg_path)
+
+        qa_report = generate_qa_report(model, dxf_path=dxf_path)
+        qa_json_path = output_dir / "qa_report.json"
+        qa_json_path.write_text(qa_report.to_json(), encoding="utf-8")
+        qa_md_path = output_dir / "qa_report.md"
+        qa_md_path.write_text(qa_report.to_markdown(), encoding="utf-8")
+
+        geometry = self._model_to_geometry_dict(model)
+        (output_dir / "geometry.json").write_text(json.dumps(geometry, indent=2), encoding="utf-8")
+        self._write_review(model, qa_report, str(output_dir), output_dir / "review.md")
+
+        return {
+            "dxf": str(dxf_path), "svg": str(svg_path),
+            "qa_report": qa_report.to_dict(),
+            "qa_report_paths": {"json": str(qa_json_path), "md": str(qa_md_path)},
+            "geometry": geometry, "model": model,
+            "review": str(output_dir / "review.md"),
+            "stats": {
+                "paths": model.entity_count(), "closed": model.closed_path_count(),
+                "open": model.open_path_count(), "segments": qa_report.total_segments,
+                "nodes": qa_report.node_count, "layers": len(qa_report.layers),
+            },
+        }
+
     @staticmethod
     def _dedupe_lines(raw_lines: list[dict], outlines: list[dict],
                       shape: tuple) -> list[dict]:
@@ -609,8 +702,8 @@ class Vectorizer:
         for o in outlines:
             pts = np.array(o["points"], dtype=np.int32)
             cv2.polylines(edge_img, [pts], o["closed"], 255, 2)
-        for l in raw_lines:
-            x1, y1, x2, y2 = [int(v) for v in l["points"][0] + l["points"][1]]
+        for line_item in raw_lines:
+            x1, y1, x2, y2 = [int(v) for v in line_item["points"][0] + line_item["points"][1]]
             length = np.hypot(x2 - x1, y2 - y1)
             if length == 0:
                 continue
@@ -619,7 +712,7 @@ class Vectorizer:
             xs = np.clip((x1 + sample * (x2 - x1)).astype(int), 0, w - 1)
             if np.mean(edge_img[ys, xs]) > 100:
                 continue
-            kept.append(l)
+            kept.append(line_item)
         return kept
 
     @staticmethod
@@ -679,9 +772,9 @@ class Vectorizer:
         md = [
             f"# DXF Vectorization Review — {pathlib.Path(image_path).name}",
             f"\n**Engine:** Classic (OpenCV)  |  **Mode:** {mode_label}  |  **Coords:** {coord}",
-            f"\n## QA Summary",
-            f"| Metric | Value |",
-            f"|---|---|",
+            "\n## QA Summary",
+            "| Metric | Value |",
+            "|---|---|",
             f"| Entities | {qa.entity_count} |",
             f"| Closed | {qa.closed_path_count} |",
             f"| Open | {qa.open_path_count} |",
@@ -692,8 +785,8 @@ class Vectorizer:
             "| Layer | Entities | ACI |",
             "|---|---|---|",
         ]
-        for l in qa.layers:
-            md.append(f"| {l.name} | {l.entity_count} | {l.color_aci} |")
+        for layer in qa.layers:
+            md.append(f"| {layer.name} | {layer.entity_count} | {layer.color_aci} |")
         if qa.warnings:
             md.append("\n## Warnings\n")
             for w in qa.warnings:

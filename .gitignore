@@ -10,8 +10,15 @@ dist/
 build/
 *.egg-info/
 
+output_cli*/
+images/
+test_out.*
+test_warped.*
+
 .vercel
 .kilo/
 .opencode/
 .kilocode/
 .agents/
+.mypy_cache/
+ASSETS/

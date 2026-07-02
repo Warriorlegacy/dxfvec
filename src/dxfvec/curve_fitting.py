@@ -27,7 +27,6 @@ import numpy as np
 from .path_model import (
     ArcSegment,
     LineSegment,
-    Path,
     PathModel,
     Vec2,
     circle_to_path,

@@ -1,109 +1,75 @@
 # dxfvec Deployment Guide
 
-## Free Deployment Options
+## Render (Recommended)
 
-### 1. Render (Recommended)
-**Free tier**: 750 hours/month, auto-sleep after inactivity
+**Target**: `dxfvec.onrender.com` | **Plan**: Starter ($7/mo for always-on)
 
-```bash
-# 1. Push to GitHub
-git init
-git add .
-git commit -m "Initial commit"
-git remote add origin https://github.com/yourusername/dxfvec.git
-git push -u origin main
+### Docker-based deployment (auto-detected from `render.yaml`)
 
-# 2. Deploy on Render
-# - Go to https://render.com
-# - Sign up with GitHub
-# - Click "New Web Service"
-# - Select your repo
-# - Render auto-detects render.yaml
-# - Click "Create Web Service"
-```
+1. Push to GitHub:
+   ```bash
+   git init && git add . && git commit -m "Production ready"
+   git remote add origin https://github.com/yourusername/dxfvec.git
+   git push -u origin main
+   ```
 
-**Result**: `https://dxfvec.onrender.com`
+2. Deploy on Render:
+   - Go to https://render.com
+   - Click **New Web Service** → Select your repo
+   - Render auto-detects `render.yaml` (Docker runtime, health check, worker)
+   - Click **Create Web Service**
 
----
+3. Verify:
+   - Health check: `https://dxfvec.onrender.com/api/ping`
+   - Web UI: `https://dxfvec.onrender.com`
 
-### 2. Railway
-**Free tier**: $5 credit/month (enough for always-on)
+### Render Configuration (`render.yaml`)
 
-```bash
-# 1. Install Railway CLI
-npm install -g @railway/cli
-
-# 2. Login and deploy
-railway login
-railway init
-railway up
-```
-
-**Result**: `https://your-app.up.railway.app`
+| Setting | Value |
+|---------|-------|
+| Runtime | Docker |
+| Plan | Starter (always-on) |
+| Health check | `/api/ping` (30s interval) |
+| Workers | 1 (OpenCV memory constraint) |
+| Timeout | 300s |
+| Auto-deploy | `main` branch |
 
 ---
 
-### 3. Fly.io
-**Free tier**: 3 shared-cpu-1x VMs, 160GB bandwidth
+## Docker (Local / Self-hosted)
 
+### Quick start
 ```bash
-# 1. Install flyctl
-curl -L https://fly.io/install.sh | sh
-
-# 2. Deploy
-fly auth login
-fly launch
-fly deploy
+docker compose up -d
+# or
+docker build -t dxfvec . && docker run -p 5000:5000 dxfvec
 ```
 
-**Result**: `https://your-app.fly.dev`
+### Production options
+```bash
+# With resource limits
+docker compose -f docker-compose.yml up -d
+
+# View logs
+docker compose logs -f dxfvec
+```
+
+### Image details
+- **Multi-stage build**: builder (compilation) + runtime (minimal)
+- **Non-root user**: `dxfvec` (security hardening)
+- **Health check**: built-in via `HEALTHCHECK` directive
+- **Base**: `python:3.11-slim-bookworm`
 
 ---
 
-### 4. Vercel (Serverless)
-**Free tier**: 100GB bandwidth, serverless functions
+## Other Platforms
 
-```bash
-# 1. Install Vercel CLI
-npm i -g vercel
-
-# 2. Deploy
-vercel
-```
-
-**Result**: `https://your-app.vercel.app`
-
----
-
-### 5. GitHub Pages (Static)
-**Free tier**: 1GB storage, 100GB bandwidth
-
-For static deployment only (no backend processing).
-
----
-
-### 6. Local Network
-```bash
-# Run on your machine, accessible on local network
-python -m dxfvec.web
-# Open http://localhost:5000
-# Others can access via http://your-ip:5000
-```
-
----
-
-## Docker Deployment
-
-```bash
-# Build
-docker build -t dxfvec .
-
-# Run
-docker run -p 5000:5000 dxfvec
-
-# Or with docker-compose
-docker-compose up -d
-```
+| Platform | Free Tier | Always-On | Method |
+|----------|-----------|-----------|--------|
+| **Render** | 750 hrs/mo | Starter plan | Docker (render.yaml) |
+| **Railway** | $5 credit | Yes | CLI: `railway up` |
+| **Fly.io** | 3 VMs | Yes | `fly deploy` |
+| **Vercel** | 100GB BW | Serverless | vercel.json |
 
 ---
 
@@ -114,18 +80,33 @@ docker-compose up -d
 | `PORT` | 5000 | Server port |
 | `FLASK_DEBUG` | 0 | Debug mode (0/1) |
 | `PYTHONUNBUFFERED` | 1 | Python output buffering |
+| `MAX_IMAGE_DIM` | 2048 | Max image dimension (px) |
+| `DOWNLOAD_TTL` | 3600 | Download file TTL (seconds) |
+
+### BYOK Cloud Providers (optional)
+```bash
+DXVEC_VECTORIZER_AI_API_ID=your_id
+DXVEC_VECTORIZER_AI_API_SECRET=your_secret
+DXVEC_DXFAI_API_KEY=your_key
+```
 
 ---
 
 ## Production Checklist
 
-- [x] Health check endpoint (`/health`)
+- [x] Docker multi-stage build (minimal image size)
+- [x] Non-root container user (`dxfvec`)
+- [x] Health check endpoint (`/api/ping`)
+- [x] Gunicorn with access/error logging
+- [x] Rate limiting (30 req/min per IP)
+- [x] MIME type sniffing guard (magic bytes)
+- [x] Decompression bomb protection (40 MP limit)
+- [x] File size validation (25 MB single / 50 MB batch)
+- [x] Security headers (CSP, HSTS, X-Frame-Options)
 - [x] CORS enabled
-- [x] Max upload size (10MB)
-- [x] Gunicorn for production
-- [x] Environment-based configuration
-- [x] No API keys required
-- [x] 100% local processing
+- [x] 100% local processing (no API keys required)
+- [x] DXF audit after every write (ezdxf.audit)
+- [x] Structured logging throughout pipeline
 
 ---
 
@@ -133,10 +114,18 @@ docker-compose up -d
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `/` | GET | Web interface |
+| `/` | GET | Web interface (single + batch) |
 | `/health` | GET | Health check |
 | `/convert` | POST | Convert image to DXF |
-| `/download/<filename>` | GET | Download DXF file |
+| `/api/batch` | POST | Batch convert ZIP of images |
+| `/download/<filename>` | GET | Download DXF ZIP bundle |
+| `/view/<filename>` | GET | DXF canvas viewer |
+| `/files` | GET | File gallery |
+| `/api/engines` | GET | List engines + presets |
+| `/api/presets` | GET | List presets |
+| `/api/providers` | GET | List cloud providers |
+| `/api/dxf/<name>` | GET | DXF entities as JSON |
+| `/api/ping` | GET | Health check |
 
 ---
 
@@ -144,10 +133,9 @@ docker-compose up -d
 
 | Platform | Free Tier | Always-On | Notes |
 |----------|-----------|-----------|-------|
-| Render | 750 hrs/mo | No (sleeps) | Auto-deploy from GitHub |
+| Render | 750 hrs/mo | Starter $7/mo | Auto-deploy from GitHub |
 | Railway | $5 credit | Yes | CLI deployment |
 | Fly.io | 3 VMs | Yes | Docker-based |
-| Vercel | 100GB BW | Serverless | Function-based |
 | Local | Unlimited | Yes | Your machine |
 
-**Total Cost: $0**
+**Total Cost: $0–$7/month**

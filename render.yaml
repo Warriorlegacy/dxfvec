@@ -1,11 +1,41 @@
 services:
   - type: web
     name: dxfvec
-    runtime: python
-    plan: free
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
     healthCheckPath: /api/ping
-    buildCommand: pip install -r requirements.txt && pip install -e .
-    startCommand: gunicorn --bind 0.0.0.0:$PORT --workers 1 --timeout 300 dxfvec.web:app
+    healthCheckTimeout: 60
     envVars:
       - key: PYTHON_VERSION
         value: 3.11.0
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: FLASK_DEBUG
+        value: "0"
+      - key: MAX_IMAGE_DIM
+        value: "2048"
+      - key: DOWNLOAD_TTL
+        value: "3600"
+    autoDeploy: true
+    branch: main
+
+  - type: worker
+    name: dxfvec-worker
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    dockerContext: .
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.0
+      - key: PYTHONUNBUFFERED
+        value: "1"
+      - key: FLASK_DEBUG
+        value: "0"
+    autoDeploy: true
+    branch: main
+    scale:
+      min: 1
+      max: 3

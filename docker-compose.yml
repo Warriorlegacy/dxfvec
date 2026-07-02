@@ -2,17 +2,55 @@ version: '3.8'
 
 services:
   dxfvec:
-    build: .
+    build:
+      context: .
+      dockerfile: Dockerfile
     ports:
       - "5000:5000"
     environment:
       - PORT=5000
       - FLASK_DEBUG=0
       - PYTHONUNBUFFERED=1
+      - MAX_IMAGE_DIM=2048
+      - DOWNLOAD_TTL=3600
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:5000/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/ping"]
       interval: 30s
       timeout: 10s
       retries: 3
       start_period: 10s
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=512m
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
+        reservations:
+          cpus: '0.5'
+          memory: 512M
+
+  dxfvec-worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: python -m dxfvec.cli batch
+    environment:
+      - PYTHONUNBUFFERED=1
+      - FLASK_DEBUG=0
+      - MAX_IMAGE_DIM=2048
+    restart: unless-stopped
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:size=1g
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 2G
