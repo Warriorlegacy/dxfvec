@@ -21,9 +21,14 @@ Fallback chain: tries providers in order until one succeeds.
 from __future__ import annotations
 
 import base64
+import logging
 from pathlib import Path
 
 import litellm
+
+logger = logging.getLogger(__name__)
+
+__all__ = ["vision_call", "resolve_model", "list_providers", "FALLBACK_CHAIN"]
 
 PROVIDER_MODELS: dict[str, str] = {
     "google":     "gemini/gemini-2.5-flash",
@@ -128,7 +133,7 @@ def vision_call(
     except Exception as e:
         if not fallback:
             raise
-        print(f"  [{provider}] failed: {type(e).__name__} — trying fallback chain...")
+        logger.warning("Provider %s failed: %s — trying fallback chain...", provider, type(e).__name__)
 
     # Try fallback chain
     tried = {provider.lower()}
@@ -137,7 +142,7 @@ def vision_call(
             continue
         fb_model = resolve_model(fb_name)
         try:
-            print(f"  trying {fb_name} ({fb_model})...")
+            logger.info("Trying %s (%s)...", fb_name, fb_model)
             response = litellm.completion(
                 model=fb_model,
                 messages=messages,
@@ -145,11 +150,11 @@ def vision_call(
                 max_tokens=max_tokens,
                 **kwargs,
             )
-            print(f"  [{fb_name}] succeeded")
+            logger.info("Provider %s succeeded", fb_name)
             return response.choices[0].message.content
         except Exception as e:
             tried.add(fb_name)
-            print(f"  [{fb_name}] failed: {type(e).__name__}")
+            logger.warning("Provider %s failed: %s", fb_name, type(e).__name__)
             continue
 
     raise RuntimeError(f"All providers failed. Tried: {', '.join(sorted(tried))}")

@@ -12,6 +12,7 @@ from __future__ import annotations
 import logging
 import math
 import tempfile
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -48,21 +49,36 @@ ALLOWED_MIME_TYPES = {
 
 # Simple in-memory rate limiter
 _rate_limit_store: dict[str, list[float]] = {}
+_rate_limit_lock = threading.Lock()
 RATE_LIMIT_MAX = 30
 RATE_LIMIT_WINDOW = 60
+_RATE_LIMIT_MAX_ENTRIES = 10000
 
 
 def _check_rate_limit(ip: str) -> bool:
+    global _rate_limit_store
     now = time.time()
     window_start = now - RATE_LIMIT_WINDOW
-    if ip in _rate_limit_store:
-        _rate_limit_store[ip] = [t for t in _rate_limit_store[ip] if t > window_start]
-    else:
-        _rate_limit_store[ip] = []
-    if len(_rate_limit_store[ip]) >= RATE_LIMIT_MAX:
-        return False
-    _rate_limit_store[ip].append(now)
-    return True
+    with _rate_limit_lock:
+        # Evict stale entries when store grows too large
+        if len(_rate_limit_store) > _RATE_LIMIT_MAX_ENTRIES:
+            _rate_limit_store = {
+                k: [t for t in v if t > window_start]
+                for k, v in _rate_limit_store.items()
+                if any(t > window_start for t in v)
+            }
+
+        if ip not in _rate_limit_store:
+            _rate_limit_store[ip] = []
+
+        timestamps = _rate_limit_store[ip]
+        timestamps[:] = [t for t in timestamps if t > window_start]
+
+        if len(timestamps) >= RATE_LIMIT_MAX:
+            return False
+
+        timestamps.append(now)
+        return True
 
 
 def _validate_mime(file_bytes: bytes) -> str | None:
@@ -124,7 +140,8 @@ def _generate_preview_svg(dxf_path: Path, out_path: Path) -> Path | None:
 </svg>"""
         out_path.write_text(svg_content, encoding="utf-8")
         return out_path
-    except Exception:
+    except Exception as e:
+        logger.debug("SVG preview generation failed: %s", e)
         return None
 
 
@@ -151,7 +168,10 @@ def _cleanup_old_downloads():
             now = time.time()
             for f in DOWNLOAD_DIR.iterdir():
                 if f.is_file() and (now - f.stat().st_mtime) > DOWNLOAD_TTL_SECONDS:
-                    f.unlink(missing_ok=True)
+                    try:
+                        f.unlink(missing_ok=True)
+                    except OSError:
+                        pass
     except Exception:
         pass
 
@@ -948,6 +968,11 @@ def batch_convert():
 
         try:
             with zipfile.ZipFile(zip_path, "r") as zf:
+                for member in zf.infolist():
+                    target = (Path(tmpdir) / member.filename).resolve()
+                    tmpdir_resolved = Path(tmpdir).resolve()
+                    if not str(target).startswith(str(tmpdir_resolved)):
+                        raise ValueError(f"ZipSlip attempt blocked: {member.filename}")
                 zf.extractall(tmpdir)
         except zipfile.BadZipFile:
             return jsonify({"error": "Invalid ZIP file"}), 400
@@ -1220,6 +1245,11 @@ def dxf_json(name):
                 if not dxf_names:
                     return jsonify({"error": "No DXF in archive"}), 400
                 tmp = Path(tempfile.mkdtemp())
+                for member in zf.infolist():
+                    target = (tmp / member.filename).resolve()
+                    tmp_resolved = tmp.resolve()
+                    if not str(target).startswith(str(tmp_resolved)):
+                        raise ValueError(f"ZipSlip attempt blocked: {member.filename}")
                 zf.extractall(tmp)
                 dxf_path = tmp / dxf_names[0]
         except Exception as e:
@@ -1288,11 +1318,27 @@ FILES_TEMPLATE = r'''
             data.files.forEach(f => {
                 const size = (f.size / 1024).toFixed(1) + ' KB';
                 const date = new Date(f.modified * 1000).toLocaleString();
-                const viewName = f.filename.replace('.zip', '.zip');
                 const tr = document.createElement('tr');
-                tr.innerHTML = `<td>${f.filename}</td><td>${size}</td><td>${date}</td>
-                    <td><a href="/view/${f.filename}">🔍 View</a> |
-                        <a href="/download/${f.filename}">⬇ Download</a></td>`;
+                const td1 = document.createElement('td');
+                td1.textContent = f.filename;
+                tr.appendChild(td1);
+                const td2 = document.createElement('td');
+                td2.textContent = size;
+                tr.appendChild(td2);
+                const td3 = document.createElement('td');
+                td3.textContent = date;
+                tr.appendChild(td3);
+                const td4 = document.createElement('td');
+                const viewLink = document.createElement('a');
+                viewLink.href = '/view/' + encodeURIComponent(f.filename);
+                viewLink.textContent = '\uD83D\uDD0D View';
+                td4.appendChild(viewLink);
+                td4.appendChild(document.createTextNode(' | '));
+                const dlLink = document.createElement('a');
+                dlLink.href = '/download/' + encodeURIComponent(f.filename);
+                dlLink.textContent = '\u2B07 Download';
+                td4.appendChild(dlLink);
+                tr.appendChild(td4);
                 tbody.appendChild(tr);
             });
         }
@@ -1688,12 +1734,12 @@ def svg_download(filename):
         return jsonify({"error": "File not found"}), 404
     try:
         with zipfile.ZipFile(zip_path, "r") as zf:
-            svg_name = filename.replace(".zip", ".svg")
-            if svg_name in zf.namelist():
-                data = zf.read(svg_name)
+            svg_files = [n for n in zf.namelist() if n.lower().endswith('.svg')]
+            if svg_files:
+                data = zf.read(svg_files[0])
                 from io import BytesIO
                 return send_file(BytesIO(data), mimetype="image/svg+xml",
-                               as_attachment=True, download_name=svg_name)
+                               as_attachment=True, download_name=svg_files[0])
     except Exception:
         pass
     return jsonify({"error": "SVG not found in bundle"}), 404
@@ -1704,12 +1750,18 @@ def generate_pdf():
     import base64
     import io
     from PIL import Image
+
+    MAX_PDF_PAYLOAD = 20 * 1024 * 1024  # 20MB
+
     data = request.get_json()
     if not data or "image" not in data:
         return jsonify({"error": "No image data"}), 400
     try:
         b64 = data["image"].split(",")[1] if "," in data["image"] else data["image"]
-        img = Image.open(io.BytesIO(base64.b64decode(b64)))
+        raw_bytes = base64.b64decode(b64)
+        if len(raw_bytes) > MAX_PDF_PAYLOAD:
+            return jsonify({"error": "Image too large (max 20MB)"}), 413
+        img = Image.open(io.BytesIO(raw_bytes))
         pdf_bytes = io.BytesIO()
         img.save(pdf_bytes, "PDF", resolution=150)
         pdf_bytes.seek(0)

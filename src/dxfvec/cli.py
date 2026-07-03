@@ -12,12 +12,15 @@ Usage:
   dxfvec engines                                                # List available engines
   dxfvec presets                                                # List presets
   dxfvec providers                                              # List cloud providers
+  dxfvec info                                                    # Runtime version info
 """
 from __future__ import annotations
 
 import csv
 import json
 import re
+import sys
+import traceback as tb
 import zipfile
 from pathlib import Path
 
@@ -159,13 +162,46 @@ def _display_qa(qa: dict) -> None:
     click.echo("-" * 50)
 
 
+def _get_pkg_version(module_name: str, version_attr: str = "__version__") -> str | None:
+    """Best-effort import returning the package version string, or None if unavailable."""
+    try:
+        mod = __import__(module_name)
+        return getattr(mod, version_attr, None)
+    except (ImportError, AttributeError):
+        return None
+
+
+def _format_version(mod: str, label: str) -> str:
+    """Return a colored status line for a required package."""
+    ver = _get_pkg_version(mod)
+    if ver:
+        return f"{label}: {ver}"
+    return click.style(f"{label}: not installed", fg="yellow")
+
+
+def _print_versions_summary() -> None:
+    """Print Python + core package versions."""
+    click.echo(click.style("Versions", bold=True))
+    click.echo("-" * 40)
+    click.echo(f"Python: {sys.version.split()[0]}")
+    click.echo(f"  {_format_version('cv2', 'OpenCV')}")
+    click.echo(f"  {_format_version('ezdxf', 'ezdxf')}")
+    click.echo(f"  {_format_version('numpy', 'numpy')}")
+    click.echo(f"  {_format_version('PIL', 'Pillow')}")
+    click.echo(f"  {_format_version('vtracer', 'vtracer')}")
+    click.echo("-" * 40)
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 #  CLI Group
 # ═══════════════════════════════════════════════════════════════════════════════
 
 @click.group()
-@click.version_option(package_name="dxfvec", version="2.0.0")
-def cli() -> None:
+@click.version_option(package_name="dxfvec")
+@click.option("--verbose", "-v", count=True, help="Increase verbosity (repeatable).")
+@click.option("--quiet", "-q", is_flag=True, help="Suppress non-essential output.")
+@click.pass_context
+def cli(ctx: click.Context, verbose: int, quiet: bool) -> None:
     """dxfvec - 100% free image vectorization and DXF conversion.
 
     Three engines:
@@ -175,7 +211,42 @@ def cli() -> None:
       advanced           Local VTracer AI-style vectorization - no API keys
 
       cloud:<provider>   External AI APIs - BYOK keys required
+
+    Global flags:
+
+      -v, --verbose   Increase output verbosity (repeatable)
+
+      -q, --quiet     Suppress non-essential output
     """
+    ctx.ensure_object(dict)
+    ctx.obj["verbose"] = verbose
+    ctx.obj["quiet"] = quiet
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+#  info
+# ═══════════════════════════════════════════════════════════════════════════════
+
+@cli.command("info")
+def info() -> None:
+    """Print Python, dependency, and runtime version information."""
+    click.echo("")
+    click.echo(click.style("dxfvec runtime info", bold=True))
+    click.echo("-" * 40)
+    click.echo(f"Python: {sys.version.split()[0]}")
+    click.echo(_format_version("cv2", "OpenCV"))
+    click.echo(_format_version("ezdxf", "ezdxf"))
+    click.echo(_format_version("numpy", "numpy"))
+    click.echo(_format_version("PIL", "Pillow"))
+    click.echo(_format_version("vtracer", "vtracer"))
+    click.echo(_format_version("flask", "Flask"))
+    click.echo(_format_version("crewai", "crewai"))
+    click.echo(_format_version("litellm", "litellm"))
+    click.echo("")
+    click.echo(f"Active image extensions: {', '.join(sorted(IMAGE_EXTENSIONS))}")
+    click.echo("Default output dir (convert): ./output")
+    click.echo("Default output dir (batch): ./batch_output")
+    click.echo("-" * 40)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -193,7 +264,8 @@ def cli() -> None:
               type=click.Choice(["logo_engrave", "laser_stencil", "technical_drawing", "contour_map"]),
               help="Optimization preset.")
 @click.option("--scale", "-s", default=None,
-              help="Pixel-to-real-world scale. Format: 'Npx=Nmm' or direct ratio.")
+              help="Pixel-to-real-world scale. Format: 'Npx=Nmm' or direct ratio. "
+                   "Enables real-world dimensional accuracy in the output DXF.")
 @click.option("--output-dir", "-o", default="./output", show_default=True,
               type=click.Path(path_type=Path), help="Output directory.")
 @click.option("--min-area", "-a", default=100, show_default=True, help="Minimum contour area in pixels.")
@@ -215,13 +287,35 @@ def cli() -> None:
 @click.option("--detect-arcs / --no-detect-arcs", default=True,
               help="Detect arcs/circles and emit native entities.")
 @click.option("--qa / --no-qa", default=True, help="Display QA report.")
+@click.option("--provider", default=None,
+              help="Vision LLM provider (google, openai, anthropic, ollama, ...). "
+                   "Requires `pip install -e \".[crew]\"`.")
+@click.option("--provider-model", default=None,
+              help="Full LiteLLM model string override (e.g. 'openai/gpt-4o').")
+@click.option("--crew / --no-crew", default=False,
+              help="Use multi-agent CrewAI pipeline instead of single LLM call.")
+@click.option("--debug", is_flag=True,
+              help="Print traceback and dump engine config on failure.")
 def convert(image: Path, engine: str, mode: str, preset: str | None,
             scale: str | None, output_dir: Path, min_area: int,
             smoothing: float | None, corner: float | None,
             noise_filter: int | None, deskew_perspective: bool,
             tolerance_mm: float | None, dxf_version: str, units: str,
-            trace_mode: str, detect_arcs: bool, qa: bool) -> None:
-    """Convert a raster image to DXF using the selected engine."""
+            trace_mode: str, detect_arcs: bool, qa: bool,
+            provider: str | None, provider_model: str | None,
+            crew: bool, debug: bool) -> None:
+    """Convert a raster image to DXF using the selected engine.
+
+    Examples:
+
+      dxfvec convert drawing.png
+
+      dxfvec convert drawing.png --engine advanced --detect-arcs
+
+      dxfvec convert drawing.png --engine cloud:vectorizer_ai
+
+      dxfvec convert drawing.png --scale 64px=20mm --dxf-version R2018
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -236,34 +330,113 @@ def convert(image: Path, engine: str, mode: str, preset: str | None,
             image = temp_warped_path
 
     scale_desc = "no scale"
+    scale_factor = None
     if scale:
         sf, _ = parse_scale(scale)
         scale_desc = f"{sf:.4f} px/{units}"
+        scale_factor = sf
 
+    if detect_arcs and scale and engine == "classic":
+        click.echo(click.style(
+            "WARNING: Classic engine arc detection operates in pixel space. "
+            "Provide --scale to enable dimensional accuracy.", fg="yellow"))
+
+    # ── LLM vision pipeline path (lazy imports — requires `pip install -e ".[crew]"`) ──
+    if provider is not None:
+        try:
+            from .providers import PROVIDER_MODELS
+            from .pipeline import convert as _pipeline_convert
+            from .crew_pipeline import run_crew as _run_crew
+        except ImportError:
+            click.echo(click.style(
+                "ERROR: LLM pipeline requires optional deps.\n"
+                "  pip install -e \".[crew]\"", fg="red"))
+            raise click.ClickException(1)
+
+        if provider_model:
+            PROVIDER_MODELS[provider] = provider_model
+
+        click.echo(f"\n[CONVERT] {image.name}  [LLM, provider={provider}"
+                   f"{' + CrewAI' if crew else ''}"
+                   f"{f', model={provider_model}' if provider_model else ''}"
+                   f"{f', scale={scale_desc}' if scale else ', pixel space'}]")
+
+        try:
+            if crew:
+                result = _run_crew(image, output_dir, provider=provider)
+            else:
+                result = _pipeline_convert(image, output_dir, provider=provider,
+                                           scale_factor=scale_factor)
+        except Exception:
+            if debug:
+                tb.print_exc()
+            raise
+
+        result.setdefault("svg", None)
+        result.setdefault("qa_report", {})
+        result.setdefault("qa_report_paths", {})
+        geo = result.get("geometry", {})
+        if not isinstance(geo, dict):
+            geo = {}
+        outlines = geo.get("outlines", [])
+        holes = geo.get("holes", [])
+        result.setdefault("stats", {
+            "paths": len(outlines) + len(holes),
+            "closed": len(outlines) + len(holes),
+            "open": len(geo.get("bend_lines", [])),
+            "nodes": sum(len(o.get("points", [])) for o in outlines),
+        })
+
+        click.echo(f"\n  DXF: {result.get('dxf', 'N/A')}")
+        stats = result.get("stats", {})
+        click.echo(f"  Paths: {stats.get('paths', 0)}  Closed: {stats.get('closed', 0)}  "
+                   f"Open: {stats.get('open', 0)}  Nodes: {stats.get('nodes', 0)}")
+        click.echo(f"  Review: {result.get('review', 'N/A')}")
+        return
+
+    # ── Engine-based path ──
     cfg = build_config(engine=engine, dxf_mode=mode, preset=preset,
                        scale=scale, min_area=min_area, smoothing=smoothing,
                        corner=corner, noise_filter=noise_filter,
                        tolerance_mm=tolerance_mm, dxf_version=dxf_version,
                        units=units, trace_mode=trace_mode, detect_arcs=detect_arcs)
 
+    if debug:
+        click.echo(f"Engine config: {json.dumps(cfg, indent=2, default=str)}")
+
     if engine.startswith("cloud:"):
-        provider_name = engine.split(":", 1)[1]
-        provider = get_cloud_provider(provider_name)
-        if provider is None:
-            click.echo(click.style(f"ERROR: Unknown cloud provider '{provider_name}'.", fg="red"))
+        prov_name = engine.split(":", 1)[1]
+        cloud_prov = get_cloud_provider(prov_name)
+        if cloud_prov is None:
+            click.echo(click.style(f"ERROR: Unknown cloud provider '{prov_name}'.", fg="red"))
             raise click.ClickException(1)
-        if not provider.is_available():
+        if not cloud_prov.is_available():
             click.echo(click.style(
-                f"ERROR: {provider.display_name} not configured. Set {provider.env_var}.", fg="red"))
+                f"ERROR: {cloud_prov.display_name} not configured. Set {cloud_prov.env_var}.", fg="red"))
             raise click.ClickException(1)
-        click.echo(f"\n[CONVERT] {image.name}  [{provider.display_name} BYOK, {scale_desc}]")
-        result = provider.convert(image, output_dir, cfg)
+        click.echo(f"\n[CONVERT] {image.name}  [{cloud_prov.display_name} BYOK, {scale_desc}]")
+        try:
+            result = cloud_prov.convert(image, output_dir, cfg)
+        except Exception:
+            if debug:
+                tb.print_exc()
+            raise
     elif engine == "advanced":
         click.echo(f"\n[CONVERT] {image.name}  [VTracer, {trace_mode}, DXF {dxf_version}, {scale_desc}]")
-        result = AdvancedEngine().convert(image, output_dir, cfg)
+        try:
+            result = AdvancedEngine().convert(image, output_dir, cfg)
+        except Exception:
+            if debug:
+                tb.print_exc()
+            raise
     else:
         click.echo(f"\n[CONVERT] {image.name}  [Classic, {trace_mode}, DXF {dxf_version}, {scale_desc}]")
-        result = ClassicEngine().convert(image, output_dir, cfg)
+        try:
+            result = ClassicEngine().convert(image, output_dir, cfg)
+        except Exception:
+            if debug:
+                tb.print_exc()
+            raise
 
     click.echo(f"\n  DXF: {result.get('dxf', 'N/A')}")
     svg_path = result.get("svg")
@@ -296,7 +469,7 @@ def convert(image: Path, engine: str, mode: str, preset: str | None,
 @click.option("--format", "-f", default="zip", type=click.Choice(["zip", "dir"]), show_default=True,
               help="Output format.")
 @click.option("--engine", "-e", default="classic", show_default=True,
-              help="Vectorization engine.")
+              help="Vectorization engine. Cloud engines fall back to classic in batch mode.")
 @click.option("--mode", "-m", default="lines", type=click.Choice(["lines", "hatch", "faces"]), show_default=True)
 @click.option("--preset", "-P", default=None,
               type=click.Choice(["logo_engrave", "laser_stencil", "technical_drawing", "contour_map"]))
@@ -308,12 +481,23 @@ def convert(image: Path, engine: str, mode: str, preset: str | None,
 @click.option("--detect-arcs / --no-detect-arcs", default=True)
 @click.option("--recursive", "-r", is_flag=True, default=False, help="Scan subdirectories.")
 @click.option("--max-files", default=0, type=int, help="Max files to process (0 = unlimited).")
+@click.option("--debug", is_flag=True,
+              help="Print traceback and dump engine config on failure.")
 def batch(input_dir: Path, output_dir: Path, format: str,
           engine: str, mode: str, preset: str | None, scale: str | None,
           tolerance_mm: float | None, dxf_version: str, units: str,
           trace_mode: str, detect_arcs: bool,
-          recursive: bool, max_files: int) -> None:
-    """Batch convert all images in INPUT_DIR to DXF."""
+          recursive: bool, max_files: int, debug: bool) -> None:
+    """Batch convert all images in INPUT_DIR to DXF.
+
+    Examples:
+
+      dxfvec batch ./drawings/
+
+      dxfvec batch ./drawings/ --format dir --engine advanced
+
+      dxfvec batch ./drawings/ --max-files 10 --recursive
+    """
     import time
 
     output_dir = Path(output_dir)
@@ -346,7 +530,24 @@ def batch(input_dir: Path, output_dir: Path, format: str,
                             tolerance_mm=tolerance_mm, dxf_version=dxf_version,
                             units=units, trace_mode=trace_mode, detect_arcs=detect_arcs)
 
-    eng_inst = AdvancedEngine() if engine == "advanced" else ClassicEngine()
+    if debug:
+        click.echo(f"Engine config: {json.dumps(dict(base_cfg), indent=2, default=str)}")
+
+    if engine.startswith("cloud:"):
+        prov_name = engine.split(":", 1)[1]
+        cloud_prov = get_cloud_provider(prov_name)
+        if cloud_prov is None:
+            click.echo(click.style(f"ERROR: Unknown cloud provider '{prov_name}'.", fg="red"))
+            raise click.ClickException(1)
+        if not cloud_prov.is_available():
+            click.echo(click.style(
+                f"ERROR: {cloud_prov.display_name} not configured. Set {cloud_prov.env_var}.", fg="red"))
+            raise click.ClickException(1)
+        eng_inst = cloud_prov
+    elif engine == "advanced":
+        eng_inst = AdvancedEngine()
+    else:
+        eng_inst = ClassicEngine()
 
     summary: list[dict] = []
     total_start = time.time()
@@ -381,6 +582,8 @@ def batch(input_dir: Path, output_dir: Path, format: str,
             success += 1
             click.echo(click.style(f" done ({elapsed:.1f}s)", fg="green"))
         except Exception as e:
+            if debug:
+                tb.print_exc()
             summary.append({"file": img.name, "status": "failed", "error": str(e)})
             failed += 1
             click.echo(click.style(f" FAILED: {e}", fg="red"))
@@ -513,7 +716,7 @@ def enhance(image: Path, output_dir: Path) -> None:
 
 @cli.command()
 def engines() -> None:
-    """List available vectorization engines."""
+    """List available vectorization engines and dependency versions."""
     click.echo("\nAvailable engines:\n")
     click.echo("  classic        Local OpenCV contour tracing (default)")
     click.echo("                 - Always available, no API keys")
@@ -528,6 +731,9 @@ def engines() -> None:
 
     for name, p in PRESETS.items():
         click.echo(f"  Preset '{name}': {p['description']}")
+
+    click.echo("")
+    _print_versions_summary()
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -553,7 +759,7 @@ def presets() -> None:
 
 @cli.command()
 def providers() -> None:
-    """List cloud AI providers and their configuration status."""
+    """List cloud AI providers available for --engine cloud:<provider> in convert."""
     click.echo("\nCloud AI providers (BYOK - Bring Your Own Key):\n")
 
     for p in list_cloud_providers():

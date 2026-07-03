@@ -50,7 +50,7 @@ LAYER_COLORS: dict[str, int] = {
     "CUT": 1,
     "ENGRAVE": 5,
     "BEND": 5,
-    "DIM": 7,
+    "DIM": 3,
     "SCRAP": 8,
 }
 
@@ -78,7 +78,7 @@ class Vec2:
         return abs(self.x - other.x) < 1e-12 and abs(self.y - other.y) < 1e-12
 
     def __hash__(self) -> int:
-        return hash((round(self.x, 6), round(self.y, 6)))
+        return hash((round(self.x, 10), round(self.y, 10)))
 
     def __sub__(self, other: Vec2) -> Vec2:
         return Vec2(self.x - other.x, self.y - other.y)
@@ -219,7 +219,9 @@ class Calibration:
     @property
     def scale_factor(self) -> float:
         if self.reference_px_length <= 0:
-            return 1.0
+            raise ValueError(
+                f"Invalid calibration: reference_px_length={self.reference_px_length} must be > 0"
+            )
         return self.real_world_length / self.reference_px_length
 
     @property

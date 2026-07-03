@@ -70,7 +70,7 @@ def preprocess(
         cv2.THRESH_BINARY, 11, 2,
     )
 
-    # 5. Ensure dark lines on white background
+    # 6. Ensure dark lines on white background
     if np.mean(binary) < 127:
         binary = cv2.bitwise_not(binary)
 

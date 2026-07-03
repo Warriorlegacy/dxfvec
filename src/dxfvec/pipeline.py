@@ -7,13 +7,17 @@ For the multi-agent CrewAI variant, see crew_pipeline.py.
 """
 from __future__ import annotations
 
+import copy
 import json
+import os
 import re
 from pathlib import Path
 
 from .dxf_writer import create_dxf
 from .preprocess import preprocess
 from .providers import vision_call
+
+__all__ = ["convert"]
 
 GEOMETRY_PROMPT = """
 Analyze this preprocessed engineering drawing image. Extract all geometry and return a SINGLE JSON object — no prose, no markdown fences.
@@ -42,88 +46,52 @@ Only include what you can clearly see. Never invent dimensions.
 
 
 def _extract_json(text: str, provider: str) -> dict:
-    """Extract JSON from LLM response with multiple fallback strategies."""
+    """Extract JSON geometry from LLM response text using multiple strategies."""
     if not text:
         raise ValueError(f"Vision LLM ({provider}) returned empty response")
-    
-    # Strategy 1: Strip markdown code blocks
-    cleaned = re.sub(r"```(?:json)?\s*", "", text)
-    cleaned = re.sub(r"```\s*", "", cleaned)
-    
-    # Strategy 2: Find outermost braces
+
+    # Strategy 1: Direct parse
+    try:
+        return json.loads(text)
+    except (json.JSONDecodeError, TypeError):
+        pass
+
+    # Strategy 2: Find JSON object boundaries
+    cleaned = text.strip()
     start = cleaned.find("{")
     end = cleaned.rfind("}")
-    
-    if start != -1 and end != -1 and end > start:
-        json_str = cleaned[start:end + 1]
+    if start != -1 and end > start:
         try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            # Fix trailing commas
-            fixed = re.sub(r",\s*([}\]])", r"\1", json_str)
-            try:
-                return json.loads(fixed)
-            except json.JSONDecodeError:
-                pass
-    
-    # Strategy 3: Try to find ANY valid JSON object in the text
-    for match in re.finditer(r"\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", text, re.DOTALL):
-        candidate = match.group()
+            return json.loads(cleaned[start : end + 1])
+        except (json.JSONDecodeError, TypeError):
+            pass
+
+    # Strategy 3: Find ```json blocks
+    json_blocks = re.findall(r"```(?:json)?\s*\n(.*?)\n```", text, re.DOTALL)
+    for block in json_blocks:
         try:
-            return json.loads(candidate)
-        except json.JSONDecodeError:
+            return json.loads(block)
+        except (json.JSONDecodeError, TypeError):
             continue
-    
-    # Strategy 4: Last resort - try to fix common issues
-    # Remove any non-JSON text before/after
-    lines = text.split("\n")
-    json_lines = []
-    in_json = False
-    for line in lines:
+
+    # Strategy 4: Find lines that look like JSON
+    for line in text.split("\n"):
         stripped = line.strip()
-        if stripped.startswith("{"):
-            in_json = True
-        if in_json:
-            json_lines.append(line)
-        if in_json and stripped.endswith("}"):
-            break
-    
-    if json_lines:
-        json_str = "\n".join(json_lines)
-        # Fix trailing commas
-        json_str = re.sub(r",\s*([}\]])", r"\1", json_str)
+        if stripped.startswith("{") and stripped.endswith("}"):
+            try:
+                return json.loads(stripped)
+            except (json.JSONDecodeError, TypeError):
+                continue
+
+    # Strategy 5: Find key geometry patterns and try boundary extraction
+    if '"outlines"' in text and '"points"' in text and start != -1 and end > start:
         try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
+            return json.loads(cleaned[start : end + 1])
+        except (json.JSONDecodeError, TypeError):
             pass
-    
-    # Strategy 5: Try to repair truncated JSON by adding missing closing brackets
-    if start != -1:
-        json_str = cleaned[start:]
-        # Count opening and closing brackets
-        open_braces = json_str.count("{")
-        close_braces = json_str.count("}")
-        open_brackets = json_str.count("[")
-        close_brackets = json_str.count("]")
-        
-        # Add missing closing brackets
-        while close_brackets < open_brackets:
-            json_str += "]"
-            close_brackets += 1
-        while close_braces < open_braces:
-            json_str += "}"
-            close_braces += 1
-        
-        # Fix trailing commas
-        json_str = re.sub(r",\s*([}\]])", r"\1", json_str)
-        try:
-            return json.loads(json_str)
-        except json.JSONDecodeError:
-            pass
-    
+
     raise ValueError(
         f"Vision LLM ({provider}) did not return valid JSON.\n"
-        f"Response saved to: raw_response.txt\n"
         f"Response (first 500 chars):\n{text[:500]}"
     )
 def _scale_geometry(geometry: dict, factor: float) -> dict:
@@ -132,7 +100,7 @@ def _scale_geometry(geometry: dict, factor: float) -> dict:
     Applies to: outlines points, holes center/radius, bend_lines points,
     dimensions positions. Dimension text is left untouched.
     """
-    scaled = json.loads(json.dumps(geometry))  # deep copy
+    scaled = copy.deepcopy(geometry)
 
     for outline in scaled.get("outlines", []):
         outline["points"] = [[x * factor, y * factor] for x, y in outline.get("points", [])]
@@ -178,9 +146,9 @@ def convert(
     # 2. Vision analysis
     raw_response = vision_call(preprocessed, GEOMETRY_PROMPT, provider=provider)
     
-    # Save raw response for debugging
-    debug_path = output_dir / "raw_response.txt"
-    debug_path.write_text(raw_response or "(empty)", encoding="utf-8")
+    if os.environ.get("DXVEC_DEBUG"):
+        debug_path = output_dir / "raw_response.txt"
+        debug_path.write_text(raw_response or "(empty)", encoding="utf-8")
 
     # Extract JSON with multiple strategies
     geometry = _extract_json(raw_response, provider)

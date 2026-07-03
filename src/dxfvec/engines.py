@@ -56,6 +56,12 @@ PRESETS: dict[str, dict[str, Any]] = {
         "corner_threshold": 70,
         "noise_filter": 2,
         "description": "High-detail for logos and artwork engraving",
+        "vtracer": {
+            "filter_speckle": 2,
+            "corner_threshold": 80,
+            "length_threshold": 3.0,
+            "colormode": "binary",
+        },
     },
     "laser_stencil": {
         "label": "Laser Stencil",
@@ -66,6 +72,12 @@ PRESETS: dict[str, dict[str, Any]] = {
         "corner_threshold": 40,
         "noise_filter": 5,
         "description": "Simplified paths for fast laser cutting",
+        "vtracer": {
+            "filter_speckle": 6,
+            "corner_threshold": 35,
+            "length_threshold": 6.0,
+            "colormode": "binary",
+        },
     },
     "technical_drawing": {
         "label": "Technical Drawing",
@@ -76,6 +88,7 @@ PRESETS: dict[str, dict[str, Any]] = {
         "corner_threshold": 60,
         "noise_filter": 3,
         "description": "Preserves dimensions, lines, and precision",
+        "vtracer": {},
     },
     "contour_map": {
         "label": "Contour Map",
@@ -86,8 +99,28 @@ PRESETS: dict[str, dict[str, Any]] = {
         "corner_threshold": 80,
         "noise_filter": 1,
         "description": "Fine detail for topographic maps and contours",
+        "vtracer": {
+            "filter_speckle": 1,
+            "corner_threshold": 90,
+            "length_threshold": 2.0,
+            "colormode": "color",
+        },
     },
 }
+
+
+def _validate_calibration(cal: Calibration) -> None:
+    """Raise ValueError for invalid calibration values."""
+    if cal.reference_px_length <= 0 or cal.real_world_length <= 0:
+        raise ValueError(
+            f"Invalid calibration values: px={cal.reference_px_length}, "
+            f"real={cal.real_world_length}. Both must be > 0."
+        )
+    if cal.real_world_length / cal.reference_px_length > 1e6:
+        raise ValueError(
+            f"Calibration scale factor too large ({cal.real_world_length / cal.reference_px_length:.0f}). "
+            "Check your reference values."
+        )
 
 
 def apply_preset(config: dict[str, Any], preset_name: str) -> dict[str, Any]:
@@ -165,6 +198,8 @@ class ClassicEngine(BaseEngine):
                 )
             elif isinstance(cal, Calibration):
                 calibration = cal
+            if calibration is not None:
+                _validate_calibration(calibration)
 
         retr_modes = {
             "auto": None,
@@ -241,8 +276,8 @@ def _apply_cnc_layers(dxf_path: Path, mode: str = "lines") -> None:
             ent.dxf["layer"] = new_layer
 
         doc.saveas(str(dxf_path))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.warning("Failed to apply CNC layer names: %s", e)
 
 
 # ── Advanced engine (local VTracer AI) ───────────────────────────────────────
@@ -310,6 +345,8 @@ class AdvancedEngine(BaseEngine):
                 )
             elif isinstance(cal, Calibration):
                 calibration = cal
+            if calibration is not None:
+                _validate_calibration(calibration)
 
         scale_factor = cfg.get("scale_factor")
         dxf_mode_str = cfg.get("dxf_mode", "lines")
@@ -320,15 +357,9 @@ class AdvancedEngine(BaseEngine):
 
         # Apply preset to vtracer config
         preset_name = cfg.get("preset", "")
-        if preset_name == "logo_engrave":
-            vcfg.update({"filter_speckle": 2, "corner_threshold": 80,
-                         "length_threshold": 3.0, "colormode": "binary"})
-        elif preset_name == "laser_stencil":
-            vcfg.update({"filter_speckle": 6, "corner_threshold": 35,
-                         "length_threshold": 6.0, "colormode": "binary"})
-        elif preset_name == "contour_map":
-            vcfg.update({"filter_speckle": 1, "corner_threshold": 90,
-                         "length_threshold": 2.0, "colormode": "color"})
+        if preset_name and preset_name in PRESETS:
+            preset_overrides = PRESETS[preset_name].get("vtracer", {})
+            vcfg.update(preset_overrides)
 
         # Extract and cast VTracer params (prevents PyO3 crashes)
         colormode = str(vcfg.get("colormode", "binary"))
@@ -497,6 +528,7 @@ class AdvancedEngine(BaseEngine):
         return model
 
     def _apply_node_reduction(self, model: PathModel, tolerance_mm: float) -> None:
+        """Deprecated: node reduction is now applied inline during SVG parsing."""
         for idx, path in enumerate(model.paths):
             pts = path.points()
             if len(pts) < 3:
@@ -509,20 +541,227 @@ class AdvancedEngine(BaseEngine):
 
     @staticmethod
     def _parse_svg_path(d: str) -> list[list[float]]:
+        """Parse SVG path data string into a list of [x, y] points.
+
+        Handles M/m (moveto), L/l (lineto), C/c (cubic Bezier),
+        S/s (smooth cubic), Q/q (quadratic), A/a (arc), Z/z (close),
+        H/h (horizontal line), V/v (vertical line).
+        Cubic Beziers are subdivided into line segments.
+        """
         import re
-        points = []
-        numbers = re.findall(r"[-+]?\d*\.?\d+", d)
-        if len(numbers) < 2:
-            return points
+
+        def _tokenize(path_d: str) -> list[str]:
+            tokens = re.findall(
+                r'[MmZzLlHhVvCcSsQqTtAa]|[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?',
+                path_d,
+            )
+            return tokens
+
+        tokens = _tokenize(d)
+        if not tokens:
+            return []
+
+        points: list[list[float]] = []
+        cur = [0.0, 0.0]
+        start = [0.0, 0.0]
+        prev_cpt: list[float] | None = None
+        prev_qpt: list[float] | None = None
         i = 0
-        while i < len(numbers) - 1:
-            try:
-                x = float(numbers[i])
-                y = float(numbers[i + 1])
-                points.append([x, y])
-                i += 2
-            except ValueError:
+
+        def _read_num() -> float:
+            nonlocal i
+            if i < len(tokens):
+                val = float(tokens[i])
                 i += 1
+                return val
+            return 0.0
+
+        def _read_coord() -> tuple[float, float]:
+            x = _read_num()
+            y = _read_num()
+            return (x, y)
+
+        def _is_num(token: str) -> bool:
+            return token[0] in "0123456789.+-eE"
+
+        while i < len(tokens):
+            cmd = tokens[i]
+            i += 1
+
+            if cmd in "Mm":
+                x, y = _read_coord()
+                if cmd == "m":
+                    x += cur[0]
+                    y += cur[1]
+                cur = [x, y]
+                start = list(cur)
+                points.append(list(cur))
+                while i < len(tokens) and _is_num(tokens[i]):
+                    x, y = _read_coord()
+                    if cmd == "m":
+                        x += cur[0]
+                        y += cur[1]
+                    cur = [x, y]
+                    points.append(list(cur))
+                prev_cpt = None
+                prev_qpt = None
+
+            elif cmd in "Ll":
+                while i < len(tokens) and _is_num(tokens[i]):
+                    x, y = _read_coord()
+                    if cmd == "l":
+                        x += cur[0]
+                        y += cur[1]
+                    cur = [x, y]
+                    points.append(list(cur))
+                prev_cpt = None
+                prev_qpt = None
+
+            elif cmd in "Hh":
+                while i < len(tokens) and _is_num(tokens[i]):
+                    x = _read_num()
+                    if cmd == "h":
+                        x += cur[0]
+                    cur[0] = x
+                    points.append(list(cur))
+                prev_cpt = None
+                prev_qpt = None
+
+            elif cmd in "Vv":
+                while i < len(tokens) and _is_num(tokens[i]):
+                    y = _read_num()
+                    if cmd == "v":
+                        y += cur[1]
+                    cur[1] = y
+                    points.append(list(cur))
+                prev_cpt = None
+                prev_qpt = None
+
+            elif cmd in "Cc":
+                while i < len(tokens) and _is_num(tokens[i]):
+                    x1, y1 = _read_coord()
+                    x2, y2 = _read_coord()
+                    x3, y3 = _read_coord()
+                    if cmd == "c":
+                        x1 += cur[0]
+                        y1 += cur[1]
+                        x2 += cur[0]
+                        y2 += cur[1]
+                        x3 += cur[0]
+                        y3 += cur[1]
+                    n_segs = 12
+                    for t_i in range(1, n_segs + 1):
+                        t = t_i / n_segs
+                        t2 = t * t
+                        t3 = t2 * t
+                        mt = 1 - t
+                        mt2 = mt * mt
+                        mt3 = mt2 * mt
+                        px = mt3 * cur[0] + 3 * mt2 * t * x1 + 3 * mt * t2 * x2 + t3 * x3
+                        py = mt3 * cur[1] + 3 * mt2 * t * y1 + 3 * mt * t2 * y2 + t3 * y3
+                        points.append([px, py])
+                    prev_cpt = [x2, y2]
+                    cur = [x3, y3]
+                prev_qpt = None
+
+            elif cmd in "Ss":
+                while i < len(tokens) and _is_num(tokens[i]):
+                    x2, y2 = _read_coord()
+                    x3, y3 = _read_coord()
+                    if cmd == "s":
+                        x2 += cur[0]
+                        y2 += cur[1]
+                        x3 += cur[0]
+                        y3 += cur[1]
+                    if prev_cpt is not None:
+                        x1 = 2 * cur[0] - prev_cpt[0]
+                        y1 = 2 * cur[1] - prev_cpt[1]
+                    else:
+                        x1, y1 = cur[0], cur[1]
+                    n_segs = 12
+                    for t_i in range(1, n_segs + 1):
+                        t = t_i / n_segs
+                        t2 = t * t
+                        t3 = t2 * t
+                        mt = 1 - t
+                        mt2 = mt * mt
+                        mt3 = mt2 * mt
+                        px = mt3 * cur[0] + 3 * mt2 * t * x1 + 3 * mt * t2 * x2 + t3 * x3
+                        py = mt3 * cur[1] + 3 * mt2 * t * y1 + 3 * mt * t2 * y2 + t3 * y3
+                        points.append([px, py])
+                    prev_cpt = [x2, y2]
+                    cur = [x3, y3]
+                prev_qpt = None
+
+            elif cmd in "Qq":
+                while i < len(tokens) and _is_num(tokens[i]):
+                    x1, y1 = _read_coord()
+                    x2, y2 = _read_coord()
+                    if cmd == "q":
+                        x1 += cur[0]
+                        y1 += cur[1]
+                        x2 += cur[0]
+                        y2 += cur[1]
+                    n_segs = 8
+                    for t_i in range(1, n_segs + 1):
+                        t = t_i / n_segs
+                        mt = 1 - t
+                        px = mt * mt * cur[0] + 2 * mt * t * x1 + t * t * x2
+                        py = mt * mt * cur[1] + 2 * mt * t * y1 + t * t * y2
+                        points.append([px, py])
+                    prev_qpt = [x1, y1]
+                    cur = [x2, y2]
+                prev_cpt = None
+
+            elif cmd in "Tt":
+                while i < len(tokens) and _is_num(tokens[i]):
+                    x2, y2 = _read_coord()
+                    if cmd == "t":
+                        x2 += cur[0]
+                        y2 += cur[1]
+                    if prev_qpt is not None:
+                        x1 = 2 * cur[0] - prev_qpt[0]
+                        y1 = 2 * cur[1] - prev_qpt[1]
+                    else:
+                        x1, y1 = cur[0], cur[1]
+                    n_segs = 8
+                    for t_i in range(1, n_segs + 1):
+                        t = t_i / n_segs
+                        mt = 1 - t
+                        px = mt * mt * cur[0] + 2 * mt * t * x1 + t * t * x2
+                        py = mt * mt * cur[1] + 2 * mt * t * y1 + t * t * y2
+                        points.append([px, py])
+                    prev_qpt = [x1, y1]
+                    cur = [x2, y2]
+                prev_cpt = None
+
+            elif cmd in "Aa":
+                while i < len(tokens) and _is_num(tokens[i]):
+                    _rx = abs(_read_num())
+                    _ry = abs(_read_num())
+                    _rotation = _read_num()
+                    _large_arc = _read_num()
+                    _sweep = _read_num()
+                    x2, y2 = _read_coord()
+                    if cmd == "a":
+                        x2 += cur[0]
+                        y2 += cur[1]
+                    n_segs = 24
+                    for t_i in range(1, n_segs + 1):
+                        t = t_i / n_segs
+                        px = cur[0] + t * (x2 - cur[0])
+                        py = cur[1] + t * (y2 - cur[1])
+                        points.append([px, py])
+                    prev_cpt = None
+                    cur = [x2, y2]
+                prev_qpt = None
+
+            elif cmd in "Zz":
+                cur = list(start)
+                points.append(list(cur))
+                prev_cpt = None
+                prev_qpt = None
+
         return points
 
     @staticmethod
@@ -552,15 +791,12 @@ class AdvancedEngine(BaseEngine):
 
     @staticmethod
     def _model_to_geometry(model: PathModel) -> dict:
+        """Deprecated: kept for backward compatibility. Use PathModel.to_dict() instead."""
         outlines = []
-        holes = []
         for path in model.paths:
-            pts = [(p.x, p.y) for p in path.points()]
-            if path.layer == "CUT":
-                outlines.append({"points": pts, "closed": path.closed})
-            else:
-                outlines.append({"points": pts, "closed": path.closed})
-        return {"outlines": outlines, "holes": holes, "bend_lines": [], "dimensions": []}
+            outline = {"points": [(p.x, p.y) for p in path.points()]}
+            outlines.append(outline)
+        return {"outlines": outlines, "holes": []}
 
     def _write_review(self, model: PathModel, qa: Any, source_name: str,
                        output_path: Path, preset: str, dxf_mode: str) -> None:

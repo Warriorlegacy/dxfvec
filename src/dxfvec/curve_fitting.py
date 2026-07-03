@@ -328,22 +328,38 @@ def douglas_peucker(
         return (p - projection).length()
 
     def _simplify_segment(segment: list[Vec2]) -> list[Vec2]:
+        """Iterative Douglas-Peucker simplification."""
         if len(segment) <= 2:
             return segment
-        max_dist = 0.0
-        max_idx = 0
-        a, b = segment[0], segment[-1]
-        for i in range(1, len(segment) - 1):
-            d = _perpendicular_distance(segment[i], a, b)
-            if d > max_dist:
-                max_dist = d
-                max_idx = i
-        if max_dist > epsilon:
-            left = _simplify_segment(segment[:max_idx + 1])
-            right = _simplify_segment(segment[max_idx:])
-            return left[:-1] + right
-        else:
-            return [segment[0], segment[-1]]
+
+        stack = [(0, len(segment) - 1)]
+        keep = [False] * len(segment)
+        keep[0] = True
+        keep[-1] = True
+
+        while stack:
+            start, end = stack.pop()
+            if end - start < 2:
+                continue
+
+            max_dist = 0.0
+            max_idx = start
+
+            line_start = segment[start]
+            line_end = segment[end]
+
+            for idx_i in range(start + 1, end):
+                dist = _perpendicular_distance(segment[idx_i], line_start, line_end)
+                if dist > max_dist:
+                    max_dist = dist
+                    max_idx = idx_i
+
+            if max_dist > epsilon:
+                keep[max_idx] = True
+                stack.append((start, max_idx))
+                stack.append((max_idx, end))
+
+        return [segment[idx_i] for idx_i in range(len(segment)) if keep[idx_i]]
 
     if closed and len(pts) > 3:
         simplified = _simplify_segment(pts + [pts[0]])

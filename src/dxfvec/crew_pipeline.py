@@ -10,6 +10,7 @@ Any vision-capable LLM works as the backend (provider arg → LiteLLM model stri
 from __future__ import annotations
 
 import json
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -20,6 +21,10 @@ from pydantic import Field
 from .dxf_writer import create_dxf
 from .preprocess import preprocess
 from .providers import resolve_model
+
+logger = logging.getLogger(__name__)
+
+__all__ = ["run_crew"]
 
 
 # ── Custom tools ────────────────────────────────────────────────────────────
@@ -43,17 +48,23 @@ class DXFWriterTool(BaseTool):
 class WriteFileTool(BaseTool):
     name: str = "write_file"
     description: str = (
-        "Write text content to a file. "
+        "Write text content to a file in the output directory. "
         "Input: JSON with keys 'path' (str) and 'content' (str). "
         "Returns the absolute file path."
     )
 
+    def __init__(self, output_dir: str, **kwargs):
+        super().__init__(**kwargs)
+        self._output_dir = Path(output_dir).resolve()
+
     def _run(self, json_input: str) -> str:
         data = json.loads(json_input)
-        path = Path(data["path"])
+        path = (self._output_dir / data["path"]).resolve()
+        if not str(path).startswith(str(self._output_dir)):
+            return "ERROR: path must be within the output directory"
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(data["content"], encoding="utf-8")
-        return str(path)
+        return f"Written to {path.name}"
 
 
 # ── Pipeline ─────────────────────────────────────────────────────────────────
@@ -79,7 +90,7 @@ def run_crew(
 
     llm_model = resolve_model(provider)
     writer_tool = DXFWriterTool(output_dir=str(output_dir_p))
-    file_tool = WriteFileTool()
+    file_tool = WriteFileTool(output_dir=str(output_dir_p))
 
     # ── Agents ───────────────────────────────────────────────────────────────
 
@@ -183,7 +194,11 @@ def run_crew(
         verbose=True,
     )
 
-    result = crew.kickoff()
+    try:
+        result = crew.kickoff()
+    except Exception as e:
+        logger.error("CrewAI pipeline failed: %s", e)
+        raise RuntimeError(f"CrewAI pipeline failed: {e}") from e
 
     return {
         "dxf":         str(output_dir_p / "drawing.dxf"),

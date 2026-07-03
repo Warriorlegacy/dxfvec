@@ -116,8 +116,9 @@ def write_dxf(
     # Post-write audit: verify the file is valid
     try:
         ezdxf.readfile(str(output_path))
-    except Exception:
-        pass
+    except Exception as e:
+        logger.error("DXF audit failed - output may be corrupt: %s", e)
+        raise RuntimeError(f"DXF file is malformed after write: {e}") from e
 
     return output_path
 
@@ -164,7 +165,7 @@ def _write_full_circle(msp, path: DxfPath) -> None:
     msp.add_circle(
         center=(seg.cx, seg.cy, 0),
         radius=seg.radius,
-        dxfattribs={"layer": path.layer},
+        dxfattribs={"layer": path.layer, "elevation": 0.0, "thickness": 0.0},
     )
 
 
@@ -271,6 +272,43 @@ def _append_arc_points(
     bulges.append(bulge)
 
 
+def _adaptive_bezier_subdivision(
+    p0: tuple[float, float],
+    p1: tuple[float, float],
+    p2: tuple[float, float],
+    p3: tuple[float, float],
+    tolerance: float = 0.01,
+) -> list[tuple[float, float]]:
+    """Subdivide cubic Bezier adaptively based on chord deviation."""
+    points: list[tuple[float, float]] = []
+
+    def _subdivide(
+        pts: tuple[tuple[float, float], tuple[float, float],
+                    tuple[float, float], tuple[float, float]],
+        depth: int = 0,
+    ) -> None:
+        if depth > 10:
+            points.append(pts[0])
+            return
+        a, b, c, d = pts
+        chord = math.hypot(d[0] - a[0], d[1] - a[1])
+        if chord < tolerance:
+            points.append(a)
+            return
+        m01 = ((a[0] + b[0]) / 2, (a[1] + b[1]) / 2)
+        m12 = ((b[0] + c[0]) / 2, (b[1] + c[1]) / 2)
+        m23 = ((c[0] + d[0]) / 2, (c[1] + d[1]) / 2)
+        m012 = ((m01[0] + m12[0]) / 2, (m01[1] + m12[1]) / 2)
+        m123 = ((m12[0] + m23[0]) / 2, (m12[1] + m23[1]) / 2)
+        m0123 = ((m012[0] + m123[0]) / 2, (m012[1] + m123[1]) / 2)
+        _subdivide((a, m01, m012, m0123), depth + 1)
+        _subdivide((m0123, m123, m23, d), depth + 1)
+
+    _subdivide((p0, p1, p2, p3))
+    points.append(p3)
+    return points
+
+
 def _append_bezier_points(
     seg: BezierSegment,
     pts: list,
@@ -279,28 +317,17 @@ def _append_bezier_points(
     """Subdivide a cubic Bezier into polyline segments.
 
     Ideal would be to use SPLINE entities, but for now subdivide
-    to stay within LWPOLYLINE.
+    to stay within LWPOLYLINE. Uses adaptive subdivision based on
+    chord deviation for optimal point density.
     """
-    subdivisions = 8
-    for i in range(subdivisions):
-        t = i / subdivisions
-        u = (i + 1) / subdivisions
+    p0 = (seg.p0.x, seg.p0.y)
+    p1 = (seg.p1.x, seg.p1.y)
+    p2 = (seg.p2.x, seg.p2.y)
+    p3 = (seg.p3.x, seg.p3.y)
 
-        def _bezier_point(t: float) -> tuple[float, float]:
-            t2 = t * t
-            t3 = t2 * t
-            u = 1.0 - t
-            u2 = u * u
-            u3 = u2 * u
-            x = u3 * seg.p0.x + 3 * u2 * t * seg.p1.x + 3 * u * t2 * seg.p2.x + t3 * seg.p3.x
-            y = u3 * seg.p0.y + 3 * u2 * t * seg.p1.y + 3 * u * t2 * seg.p2.y + t3 * seg.p3.y
-            return (x, y)
-
-        pt = _bezier_point(t)
-        if i == 0:
-            pts.append(pt)
-        next_pt = _bezier_point(u)
-        pts.append(next_pt)
+    curve_pts = _adaptive_bezier_subdivision(p0, p1, p2, p3)
+    for pt in curve_pts:
+        pts.append(pt)
         bulges.append(0.0)
 
 
@@ -347,12 +374,41 @@ def _path_to_svg_d(path: DxfPath) -> str:
 
 
 def _aci_to_svg_color(aci: int) -> str:
-    palette = {
-        1: "#FF0000", 2: "#FFFF00", 3: "#00FF00", 4: "#00FFFF",
-        5: "#0000FF", 6: "#FF00FF", 7: "#000000", 8: "#808080",
-        9: "#C0C0C0",
+    """Convert AutoCAD Color Index (ACI) to SVG hex color."""
+    if aci <= 0 or aci > 255:
+        return "#000000"
+
+    aci_palette = {
+        1: "#ff0000", 2: "#ffff00", 3: "#00ff00", 4: "#00ffff",
+        5: "#0000ff", 6: "#ff00ff", 7: "#ffffff", 8: "#808080",
+        9: "#c0c0c0", 10: "#800000",
     }
-    return palette.get(aci, "#000000")
+
+    if aci in aci_palette:
+        return aci_palette[aci]
+
+    h = (aci - 10) * 360.0 / 244.0
+    s = 0.8 if aci % 2 == 0 else 0.6
+    lightness = 0.5 if aci % 3 != 0 else 0.65
+
+    c = (1 - abs(2 * lightness - 1)) * s
+    x = c * (1 - abs((h / 60) % 2 - 1))
+    m = lightness - c / 2
+    if h < 60:
+        r, g, b = c, x, 0
+    elif h < 120:
+        r, g, b = x, c, 0
+    elif h < 180:
+        r, g, b = 0, c, x
+    elif h < 240:
+        r, g, b = 0, x, c
+    elif h < 300:
+        r, g, b = x, 0, c
+    else:
+        r, g, b = c, 0, x
+
+    r, g, b = int((r + m) * 255), int((g + m) * 255), int((b + m) * 255)
+    return f"#{r:02x}{g:02x}{b:02x}"
 
 
 # ── Backward-compatible alias ────────────────────────────────────────────────

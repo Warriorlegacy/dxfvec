@@ -7,6 +7,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
+import pytest
+
 from dxfvec.path_model import (
     ArcSegment,
     Calibration,
@@ -123,7 +125,8 @@ def test_calibration():
 
     cal2 = Calibration(reference_px_length=0, real_world_length=50, unit="mm")
     assert cal2.is_valid is False
-    assert cal2.scale_factor == 1.0
+    with pytest.raises(ValueError):
+        _ = cal2.scale_factor
 
 
 def test_detect_open_paths():

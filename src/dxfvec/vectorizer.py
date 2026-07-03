@@ -145,10 +145,22 @@ def _merge_nearby_outlines(outlines: list[dict],
             parent[rb] = ra
             rank[ra] += 1
 
-    for i in range(len(outlines)):
-        for j in range(i + 1, len(outlines)):
-            if np.linalg.norm(centroids[i] - centroids[j]) <= max_centroid_gap_px:
-                union(i, j)
+    # Spatial hash for O(n) near-neighbor merge instead of O(n^2)
+    cell_size = max_centroid_gap_px * 2
+    grid: dict[tuple[int, int], list[int]] = {}
+    for idx, c in enumerate(centroids):
+        cell = (int(c[0] // cell_size), int(c[1] // cell_size))
+        grid.setdefault(cell, []).append(idx)
+
+    for i, ci in enumerate(centroids):
+        cell = (int(ci[0] // cell_size), int(ci[1] // cell_size))
+        for dx in (-1, 0, 1):
+            for dy in (-1, 0, 1):
+                for j in grid.get((cell[0] + dx, cell[1] + dy), []):
+                    if j <= i:
+                        continue
+                    if np.linalg.norm(ci - centroids[j]) <= max_centroid_gap_px:
+                        union(i, j)
 
     groups: dict[int, list[int]] = {}
     for i in range(len(outlines)):
