@@ -9,41 +9,49 @@
 1. [What is DXFvec](#1-what-is-dxfvec)
 2. [System Requirements](#2-system-requirements)
 3. [Installation](#3-installation)
-4. [Quick Start](#4-quick-start)
-5. [CLI Reference](#5-cli-reference)
+4. [Local Development Setup](#4-local-development-setup)
+   - [Prerequisites](#prerequisites)
+   - [Clone & Install](#clone--install)
+   - [Environment Configuration](#environment-configuration)
+   - [Verify Setup](#verify-setup)
+   - [Running Locally](#running-locally)
+   - [IDE Setup](#ide-setup)
+   - [Common Development Tasks](#common-development-tasks)
+5. [Quick Start](#5-quick-start)
+6. [CLI Reference](#6-cli-reference)
    - [Global Options](#global-options)
    - [dxfvec convert](#dxfvec-convert)
    - [dxfvec batch](#dxfvec-batch)
    - [dxfvec modify](#dxfvec-modify)
    - [dxfvec enhance](#dxfvec-enhance)
    - [dxfvec engines / presets / providers / info](#informational-commands)
-6. [Engines](#6-engines)
+7. [Engines](#7-engines)
    - [Classic Engine](#classic-engine)
    - [Advanced Engine](#advanced-engine)
    - [Cloud AI Engines](#cloud-ai-engines-byok)
-7. [Presets](#7-presets)
-8. [Calibration & Units](#8-calibration--units)
-9. [DXF Output Details](#9-dxf-output-details)
-   - [Layer Semantics](#layer-semantics)
-   - [DXF Versions](#dxf-versions)
-   - [Arc & Circle Detection](#arc--circle-detection)
-10. [QA Reports](#10-qa-reports)
-11. [Web UI](#11-web-ui)
-   - [Starting the Server](#starting-the-server)
-   - [Single Image Upload](#single-image-upload)
-   - [Batch Upload](#batch-upload)
-   - [DXF Viewer](#dxf-viewer)
-   - [File Gallery](#file-gallery)
-12. [REST API](#12-rest-api)
-13. [LLM Vision Pipeline](#13-llm-vision-pipeline)
-   - [Setup](#setup)
-   - [Single LLM Call](#single-llm-call)
-   - [CrewAI Multi-Agent](#crewai-multi-agent)
-14. [Python API](#14-python-api)
-15. [Docker Deployment](#15-docker-deployment)
-16. [Environment Variables](#16-environment-variables)
-17. [Troubleshooting](#17-troubleshooting)
-18. [FAQ](#18-faq)
+8. [Presets](#8-presets)
+9. [Calibration & Units](#9-calibration--units)
+10. [DXF Output Details](#10-dxf-output-details)
+    - [Layer Semantics](#layer-semantics)
+    - [DXF Versions](#dxf-versions)
+    - [Arc & Circle Detection](#arc--circle-detection)
+11. [QA Reports](#11-qa-reports)
+12. [Web UI](#12-web-ui)
+    - [Starting the Server](#starting-the-server)
+    - [Single Image Upload](#single-image-upload)
+    - [Batch Upload](#batch-upload)
+    - [DXF Viewer](#dxf-viewer)
+    - [File Gallery](#file-gallery)
+13. [REST API](#13-rest-api)
+14. [LLM Vision Pipeline](#14-llm-vision-pipeline)
+    - [Setup](#setup)
+    - [Single LLM Call](#single-llm-call)
+    - [CrewAI Multi-Agent](#crewai-multi-agent)
+15. [Python API](#15-python-api)
+16. [Docker Deployment](#16-docker-deployment)
+17. [Environment Variables](#17-environment-variables)
+18. [Troubleshooting](#18-troubleshooting)
+19. [FAQ](#19-faq)
 
 ---
 
@@ -129,7 +137,324 @@ dxfvec info
 
 ---
 
-## 4. Quick Start
+## 4. Local Development Setup
+
+Step-by-step guide to get DXFvec running from source on your local machine.
+
+### Prerequisites
+
+**Required:**
+- **Python 3.10+** (3.10, 3.11, or 3.12 confirmed working)
+- **Git**
+- **pip** (bundled with Python 3.10+)
+
+**Optional but recommended:**
+- **pyenv** (Python version management) — avoids system Python conflicts
+- **pipx** (global CLI installs)
+- **Docker Desktop** (for containerized testing)
+
+**OS-specific system libraries (Linux only):**
+
+```bash
+# Ubuntu / Debian — required before install
+sudo apt update && sudo apt install -y libglib2.0-0 libgomp1
+
+# Fedora / RHEL
+sudo dnf install glib2 libgomp
+```
+
+Windows and macOS need no extra system libraries.
+
+### Clone & Install
+
+**1. Clone the repository:**
+
+```bash
+git clone https://github.com/Warriorlegacy/dxfvec.git
+cd dxfvec
+```
+
+**2. Create and activate a virtual environment:**
+
+```bash
+# Create venv
+python -m venv .venv
+
+# Activate — Windows (PowerShell):
+.venv\Scripts\Activate.ps1
+
+# Activate — Windows (cmd):
+.venv\Scripts\activate.bat
+
+# Activate — macOS / Linux:
+source .venv/bin/activate
+```
+
+> **PowerShell users:** If you get a "running scripts is disabled" error:
+> ```powershell
+> Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+> ```
+
+**3. Install in editable mode with all extras:**
+
+```bash
+# Full install (CLI + web UI + LLM pipeline + dev tools)
+pip install -e ".[web,crew,dev]"
+```
+
+Or install selectively:
+
+```bash
+# CLI only (no web UI, no LLM)
+pip install -e .
+
+# CLI + web UI
+pip install -e ".[web]"
+
+# CLI + LLM vision pipeline
+pip install -e ".[crew]"
+
+# Everything including dev tools
+pip install -e ".[web,crew,dev]"
+```
+
+**4. Verify the install:**
+
+```bash
+dxfvec info
+dxfvec engines
+dxfvec presets
+```
+
+You should see Python version, dependency versions, and the list of engines/presets.
+
+### Environment Configuration
+
+**1. Copy the example env file:**
+
+```bash
+cp .env.example .env
+```
+
+**2. Edit `.env` with your keys (only what you need):**
+
+```ini
+# Web server (defaults work for local dev)
+PORT=5000
+FLASK_DEBUG=1
+
+# LLM providers — uncomment at least one if using --provider
+# GEMINI_API_KEY=your-key-here
+# OPENAI_API_KEY=your-key-here
+
+# Cloud engines (optional)
+# DXVEC_VECTORIZER_AI_API_ID=your-id
+# DXVEC_VECTORIZER_AI_API_SECRET=your-secret
+```
+
+**3. `.env` is loaded automatically** by:
+- Flask (web UI)
+- LiteLLM (LLM pipeline)
+- The CLI reads it on startup
+
+> **Security:** `.env` is in `.gitignore` and will NOT be committed. Never paste real API keys into chat or commit messages.
+
+### Verify Setup
+
+Run these commands to confirm everything works:
+
+```bash
+# 1. Show runtime info
+dxfvec info
+
+# 2. Check engines are available
+dxfvec engines
+
+# 3. List presets
+dxfvec presets
+
+# 4. Check cloud provider status
+dxfvec providers
+
+# 5. Run the full test suite
+python -m pytest tests/ -v --timeout=60
+
+# 6. Run linting
+ruff check src/ tests/
+
+# 7. Run type checking
+mypy src/ --ignore-missing-imports
+```
+
+Expected output:
+- `dxfvec info` shows all dependencies with version numbers
+- `ruff check` passes with 0 errors
+- `pytest` shows 153 tests passing
+
+### Running Locally
+
+**Option A: Web UI (development server)**
+
+```bash
+python -m dxfvec.web
+# Open http://localhost:5000
+```
+
+Flask runs with `FLASK_DEBUG=1` — auto-reloads on code changes.
+
+**Option B: CLI**
+
+```bash
+# Convert a test image
+dxfvec convert path/to/image.png --engine classic --mode lines -o ./output/
+
+# Batch convert
+dxfvec batch ./test_images/ --engine advanced
+```
+
+**Option C: Python API**
+
+```python
+# From a Python shell or script
+from pathlib import Path
+from dxfvec import ClassicEngine
+
+engine = ClassicEngine()
+result = engine.convert(
+    image_path=Path("test.png"),
+    output_dir=Path("./output"),
+    config={
+        "dxf_mode": "lines",
+        "dxf_version": "R2010",
+        "trace_mode": "outline",
+        "detect_arcs": True,
+        "cnc_layers": True,
+        "units": "mm",
+    },
+)
+print(result["dxf"])
+```
+
+**Option D: Docker (local container)**
+
+```bash
+docker compose up -d
+# Web UI at http://localhost:5000
+docker compose logs -f   # watch logs
+docker compose down      # stop
+```
+
+### IDE Setup
+
+**VS Code (recommended):**
+
+1. Install the Python extension
+2. Open the project folder
+3. Select the `.venv` interpreter (Ctrl+Shift+P → "Python: Select Interpreter")
+4. Recommended extensions:
+   - Ruff (linting/formatting)
+   - Python (language support)
+   - Pylance (type checking)
+
+**PyCharm:**
+
+1. Open the project root
+2. Set interpreter to `.venv/Scripts/python.exe` (Windows) or `.venv/bin/python` (macOS/Linux)
+3. Mark `src/` as Sources Root
+
+### Common Development Tasks
+
+**Run tests:**
+
+```bash
+# Full suite
+python -m pytest tests/ -v --timeout=60
+
+# Single test file
+python -m pytest tests/test_path_model.py -v
+
+# Single test
+python -m pytest tests/test_path_model.py::test_vec2_operations -v
+
+# With coverage
+pip install pytest-cov
+python -m pytest tests/ --cov=dxfvec --cov-report=html
+```
+
+**Lint and format:**
+
+```bash
+# Check for lint errors
+ruff check src/ tests/
+
+# Auto-fix lint errors
+ruff check src/ tests/ --fix
+
+# Format code
+ruff format src/ tests/
+```
+
+**Type check:**
+
+```bash
+mypy src/ --ignore-missing-imports
+```
+
+**Test a single image through the full pipeline:**
+
+```bash
+# Classic engine
+dxfvec convert test.png --debug -o ./test_output/
+
+# Advanced engine with arcs
+dxfvec convert test.png --engine advanced --detect-arcs --tolerance-mm 0.1 --debug
+
+# With calibration
+dxfvec convert test.png --scale 64px=20mm --dxf-version R2018 --debug
+```
+
+**Generate a test DXF programmatically:**
+
+```python
+from pathlib import Path
+from dxfvec import PathModel, polyline_to_path, circle_to_path, write_dxf
+
+model = PathModel()
+
+# Square
+model.paths.append(polyline_to_path(
+    [(0, 0), (50, 0), (50, 50), (0, 50)],
+    layer="CUT", closed=True,
+))
+
+# Circle
+model.paths.append(circle_to_path(25, 25, 10, layer="ENGRAVE", n_points=32))
+
+write_dxf(model, Path("test_output.dxf"), dxf_version="R2010", units="mm")
+```
+
+**Reset the development environment:**
+
+```bash
+# Nuclear option — rebuild venv from scratch
+deactivate
+rm -rf .venv/
+python -m venv .venv
+source .venv/bin/activate   # or .venv\Scripts\activate on Windows
+pip install -e ".[web,crew,dev]"
+cp .env.example .env
+# Edit .env as needed
+```
+
+**Update dependencies:**
+
+```bash
+pip install -e ".[web,crew,dev]" --upgrade
+```
+
+---
+
+## 5. Quick Start
 
 ### Convert a single image (simplest)
 
@@ -168,7 +493,7 @@ dxfvec convert blueprint.png --preset technical_drawing
 
 ---
 
-## 5. CLI Reference
+## 6. CLI Reference
 
 ### Global Options
 
@@ -377,7 +702,7 @@ dxfvec info
 
 ---
 
-## 6. Engines
+## 7. Engines
 
 ### Classic Engine
 
@@ -444,7 +769,7 @@ dxfvec providers
 
 ---
 
-## 7. Presets
+## 8. Presets
 
 Presets are pre-configured parameter sets optimized for specific use cases.
 
@@ -480,7 +805,7 @@ dxfvec convert image.png --preset logo_engrave --tolerance-mm 0.02
 
 ---
 
-## 8. Calibration & Units
+## 9. Calibration & Units
 
 Calibration maps pixel dimensions to real-world measurements, enabling dimensionally accurate DXF output.
 
@@ -522,7 +847,7 @@ dxfvec convert image.png --scale 3.2
 
 ---
 
-## 9. DXF Output Details
+## 10. DXF Output Details
 
 ### Layer Semantics
 
@@ -565,7 +890,7 @@ When `--detect-arcs` is enabled (default), DXFvec detects circular arcs and full
 
 ---
 
-## 10. QA Reports
+## 11. QA Reports
 
 Every conversion produces a QA report (displayed in CLI, downloadable in web UI).
 
@@ -614,7 +939,7 @@ Every conversion produces a QA report (displayed in CLI, downloadable in web UI)
 
 ---
 
-## 11. Web UI
+## 12. Web UI
 
 ### Starting the server
 
@@ -681,7 +1006,7 @@ Browse all previous conversions at `/files`:
 
 ---
 
-## 12. REST API
+## 13. REST API
 
 | Route | Method | Description |
 |-------|--------|-------------|
@@ -718,7 +1043,7 @@ curl http://localhost:5000/api/ping
 
 ---
 
-## 13. LLM Vision Pipeline
+## 14. LLM Vision Pipeline
 
 The LLM vision pipeline uses large language models with vision capabilities to analyze images and generate geometry JSON, which is then converted to DXF.
 
@@ -780,7 +1105,7 @@ dxfvec convert sketch.png --provider google --crew
 
 ---
 
-## 14. Python API
+## 15. Python API
 
 ### Basic conversion
 
@@ -869,7 +1194,7 @@ processed = preprocess(img, output_dir=Path("./preprocessed"))
 
 ---
 
-## 15. Docker Deployment
+## 16. Docker Deployment
 
 ### Development
 
@@ -921,7 +1246,7 @@ services:
 
 ---
 
-## 16. Environment Variables
+## 17. Environment Variables
 
 | Variable | Default | Description |
 |----------|---------|-------------|
@@ -958,7 +1283,7 @@ services:
 
 ---
 
-## 17. Troubleshooting
+## 18. Troubleshooting
 
 | Problem | Cause | Solution |
 |---------|-------|----------|
@@ -977,7 +1302,7 @@ services:
 
 ---
 
-## 18. FAQ
+## 19. FAQ
 
 **Q: Do I need a GPU?**
 No. DXFvec is entirely CPU-based. OpenCV, VTracer, and all processing run on the CPU.
