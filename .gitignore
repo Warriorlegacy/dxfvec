@@ -22,3 +22,6 @@ test_warped.*
 .agents/
 .mypy_cache/
 ASSETS/
+
+# Benchmark scratch space (generated at runtime)
+benchmarks/.work/
