@@ -330,9 +330,11 @@ class ShapeDetector:
         if raw is None:
             return []
         result = []
-        for seg in raw:
-            x1, y1, x2, y2 = seg[0]
-            result.append({"points": [[x1, y1], [x2, y2]],
+        # OpenCV 4.x returns HoughLinesP output shaped (N, 1, 4); OpenCV 5.x
+        # returns (N, 4). reshape(-1, 4) normalises both so this does not
+        # break when the installed OpenCV major version changes.
+        for x1, y1, x2, y2 in np.asarray(raw).reshape(-1, 4):
+            result.append({"points": [[int(x1), int(y1)], [int(x2), int(y2)]],
                            "length": float(np.hypot(x2 - x1, y2 - y1))})
         return result
 

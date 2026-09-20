@@ -273,7 +273,9 @@ def _apply_cnc_layers(dxf_path: Path, mode: str = "lines") -> None:
         for ent in msp:
             old_layer = ent.dxf.get("layer", "0")
             new_layer = layer_map.get(old_layer, old_layer)
-            ent.dxf["layer"] = new_layer
+            # ezdxf exposes DXF attributes via __getattr__/__setattr__;
+            # item assignment (ent.dxf["layer"] = x) raises TypeError.
+            ent.dxf.layer = new_layer
 
         doc.saveas(str(dxf_path))
     except Exception as e:
