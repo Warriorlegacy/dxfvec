@@ -162,7 +162,9 @@ DXVEC_DXFAI_API_KEY=your_key
 ## Tests
 
 ```bash
-# Full test suite (4 files, ~52 tests)
+# Install the dev extra (ruff, mypy, pytest, pytest-timeout)
+pip install -e ".[dev]"
+# Full suite — 158 tests across 10 files
 python -m pytest tests/ -v --timeout=60
 
 # Standalone smoke test (no pytest)
@@ -172,6 +174,17 @@ python test_smoke.py
 ruff check src/ tests/
 mypy src/ --ignore-missing-imports
 ```
+
+**158 tests** covering `curve_fitting`, `dxf_writer`, `engines`, `path_model`,
+`path_model_extended`, `pipeline`, `preprocess`, `providers`, `qa_report`, and
+`opencv_compat` (the OpenCV 5.x compatibility regression suite). CI runs the same
+command on Python 3.10 and 3.11 via `.github/workflows/ci.yml`.
+
+## Benchmarks
+
+Reproducible performance numbers live in `benchmarks/`, produced by the harness in
+`benchmarks/run_benchmarks.py`. See [BENCHMARKS.md](BENCHMARKS.md) for methodology and
+measured results.
 
 ## Environment Variables
 

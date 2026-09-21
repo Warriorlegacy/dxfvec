@@ -1,7 +1,6 @@
 """Extended tests for path model — Vec2, Calibration, PathModel edge cases."""
 from __future__ import annotations
 
-import math
 import sys
 from pathlib import Path
 
@@ -13,11 +12,9 @@ from dxfvec.path_model import (
     ArcSegment,
     BezierSegment,
     Calibration,
-    DXFVersion,
     LineSegment,
     Path,
     PathModel,
-    TraceMode,
     Vec2,
     circle_to_path,
     polyline_to_path,

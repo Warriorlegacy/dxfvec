@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import tempfile
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 
@@ -138,8 +139,6 @@ class TestVisionCall:
             with pytest.raises(RuntimeError, match="All providers failed"):
                 vision_call(img_path, "Describe", provider="google", fallback=True)
 
-
-import tempfile
 
 if __name__ == "__main__":
     pytest.main([__file__, "-v"])
