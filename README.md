@@ -51,12 +51,57 @@ dxfvec providers
 ## Quick Start
 
 ```bash
-pip install -r requirements.txt
-pip install -e .
-dxfvec convert input.png --engine classic --mode lines -o output.dxf
+# CLI users (recommended)
+pipx install dxfvec
+dxfvec engines
+
+# Developers
+git clone https://github.com/yourorg/dxfvec.git
+cd dxfvec
+python -m venv .venv
+source .venv/bin/activate   # or .venv\Scripts\activate on Windows
+pip install -e ".[web,crew]"
+dxfvec engines
 ```
 
-### Web Server
+See [INSTALL.md](INSTALL.md) for platform-specific notes, Docker, and Azure/GCP/Render deployment.
+
+## CLI
+
+```bash
+dxfvec convert image.png --engine classic --mode lines -o output/
+dxfvec convert image.png --engine advanced --detect-arcs --tolerance-mm 0.1
+dxfvec convert image.png --scale 64px=20mm --dxf-version R2018
+dxfvec batch ./images/ --format zip --engine advanced
+dxfvec modify image.png --rotate 90 --resize 2 --enhance --denoise --sharpen --deskew
+dxfvec enhance image.png
+dxfvec engines
+dxfvec presets
+dxfvec providers
+dxfvec info
+```
+
+### Batch processing
+
+```bash
+dxfvec batch ./drawings/ --format zip --max-files 50 --recursive
+```
+
+> Note: cloud engines (`cloud:*`) fall back to Classic in batch mode. Use `dxfvec convert --engine cloud:...` for cloud jobs.
+
+### LLM vision pipeline
+
+Requires the `.[crew]` extra and API keys in `.env`:
+
+```bash
+cp .env.example .env
+# set keys in .env
+
+dxfvec convert image.png --provider google
+dxfvec convert image.png --provider openai --provider-model "openai/gpt-4o" --crew
+```
+
+### Web server
 
 ```bash
 python -m dxfvec.web
@@ -117,6 +162,35 @@ DXVEC_DXFAI_API_KEY=your_key
 ## Tests
 
 ```bash
-python -m pytest tests/ -v
-# 52 tests: curve_fitting, dxf_writer, path_model, qa_report
+# Full test suite (4 files, ~52 tests)
+python -m pytest tests/ -v --timeout=60
+
+# Standalone smoke test (no pytest)
+python test_smoke.py
+
+# Lint & type check (CI steps)
+ruff check src/ tests/
+mypy src/ --ignore-missing-imports
 ```
+
+## Environment Variables
+
+```bash
+cp .env.example .env
+```
+
+Set keys for the LLM fallback chain or cloud engines. LiteLLM reads `.env` automatically. See [INSTALL.md](INSTALL.md) for the full env table.
+
+## Deployment
+
+- **Render**: `render.yaml` configured — push to `main` triggers auto-deploy
+- **Docker**: `docker compose up -d`
+- **Docs**: See [INSTALL.md](INSTALL.md) and [DEPLOY.md](DEPLOY.md)
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md) for dev setup, linting, and conventions.
+
+## License
+
+Apache-2.0 — see [LICENSE](LICENSE).

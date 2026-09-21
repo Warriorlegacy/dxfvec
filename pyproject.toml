@@ -24,7 +24,7 @@ dependencies = [
 [project.optional-dependencies]
 web = ["flask>=3.0", "flask-cors>=4.0", "gunicorn>=21.2"]
 crew = ["crewai>=0.55", "litellm>=1.40"]
-cloud = ["requests>=2.31"]
+dev = ["ruff>=0.4", "mypy>=1.0", "pytest>=8.0", "pytest-timeout>=2.0"]
 
 [project.scripts]
 dxfvec = "dxfvec.cli:main"
