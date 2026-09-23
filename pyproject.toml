@@ -28,7 +28,7 @@ cloud = ["requests>=2.31"]
 dev = [
     "pytest>=8",
     "pytest-timeout>=2",
-    "ruff>=0.6",
+    "ruff==0.15.18",
     "mypy>=1.10",
 ]
 
