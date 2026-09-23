@@ -8,6 +8,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import pytest
 
+pytest.importorskip(
+    "litellm",
+    reason="litellm is an optional dependency (crew extra); these tests need it via dxfvec.pipeline -> providers",
+)
+
 from dxfvec.pipeline import _extract_json, _scale_geometry
 
 

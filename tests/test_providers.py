@@ -10,6 +10,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
 import pytest
 
+pytest.importorskip(
+    "litellm",
+    reason="litellm is an optional dependency (crew extra); these tests exercise litellm-backed providers",
+)
+
 from dxfvec.providers import (
     PROVIDER_MODELS,
     FALLBACK_CHAIN,
