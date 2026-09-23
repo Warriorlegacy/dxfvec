@@ -5,16 +5,15 @@ import sys
 import tempfile
 from pathlib import Path
 
+from dxfvec.cloud_providers import CLOUD_PROVIDERS
+
 errors = []
 
 # 1. Package imports
 print("[1] Importing package...")
 try:
-    import dxfvec
-    from dxfvec.engines import ClassicEngine, AdvancedEngine, PRESETS, list_presets, apply_preset
-    from dxfvec.cloud_providers import get_cloud_provider, list_cloud_providers, get_api_key
+    from dxfvec.engines import ClassicEngine, AdvancedEngine, PRESETS, apply_preset
     from dxfvec.dxf_writer import create_dxf
-    from dxfvec.vectorizer import vectorize_image
     print("    OK — all imports succeeded")
 except Exception as e:
     errors.append(f"Import failed: {e}")
@@ -35,7 +34,6 @@ else:
 
 # 3. Cloud provider registry
 print("[3] Checking cloud providers...")
-from dxfvec.cloud_providers import CLOUD_PROVIDERS
 expected_providers = {"vectorizer_ai", "dxfai"}
 actual_providers = set(CLOUD_PROVIDERS.keys())
 if expected_providers == actual_providers:

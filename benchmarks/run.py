@@ -193,7 +193,7 @@ def main() -> int:
         generate_technical_drawing(p, size)
         images[label] = p
 
-    print(f"dxfvec conversion benchmark")
+    print("dxfvec conversion benchmark")
     print(f"  platform : {platform.system()} {platform.release()}")
     print(f"  python   : {platform.python_version()}")
     print(f"  engines  : {', '.join(engines)}")
