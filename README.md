@@ -1,5 +1,7 @@
 # DXFvec
 
+[![CI](https://github.com/Warriorlegacy/dxfvec/actions/workflows/ci.yml/badge.svg)](https://github.com/Warriorlegacy/dxfvec/actions/workflows/ci.yml)
+
 **100% free image vectorization and DXF conversion** — no API keys required.
 Convert raster images (PNG, JPG, WEBP, BMP, TIFF) into CAD/CNC-ready DXF vectors with CUT/ENGRAVE/BEND/DIM layer semantics.
 
